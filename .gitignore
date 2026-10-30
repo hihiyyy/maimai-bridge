@@ -10,6 +10,10 @@ sync.log
 sync.log.old
 persona.md
 settings.json
+logins.json
+taste.json
+browser-profile/
+data/
 *.bak
 
 # emit_preset.py 生成出来的 preset（每台机器路径不同，自己生成）

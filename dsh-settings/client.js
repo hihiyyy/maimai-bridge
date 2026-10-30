@@ -130,6 +130,18 @@ window.__ModuleLoader__.load({
       { key: 'speak_model', label: '口吻模型', type: 'string', hint: 'maimai_speak 用哪个模型，留空用宿主默认' },
     ]
 
+    /** [taste] 段：她自己点赞 / 收藏的那套开关。 */
+    const TASTE_FIELDS = [
+      { key: 'enabled', label: '允许她自己动手', type: 'boolean', hint: '关掉后只会嘴上说喜欢，不点赞也不收藏' },
+      { key: 'auto_like', label: '可以自己点赞', type: 'boolean', hint: '' },
+      { key: 'auto_fav', label: '可以自己收藏', type: 'boolean', hint: '' },
+      { key: 'fav_folder', label: '收藏夹', type: 'string', hint: '留空 = 默认收藏夹；填名字或 id 都行' },
+      { key: 'daily_limit', label: '每天最多几次', type: 'number', hint: '0 = 不限' },
+      { key: 'cooldown_seconds', label: '两次间隔（秒）', type: 'number', hint: '防止一激动连点一串被当成刷赞' },
+      { key: 'require_reason', label: '必须说为什么喜欢', type: 'boolean', hint: '让她记住自己为什么喜欢，也挡住乱点' },
+      { key: 'dry_run', label: '试运行', type: 'boolean', hint: '只记账不真发，先看看她的口味再放开' },
+    ]
+
     function MaimaiSettings() {
       const [status, setStatus] = useState(null)
       const [form, setForm] = useState({
@@ -149,9 +161,21 @@ window.__ModuleLoader__.load({
       const [writeSource, setWriteSource] = useState('dsh:settings')
       const [writeLog, setWriteLog] = useState('')
       const [regenerateLog, setRegenerateLog] = useState('')
+      const [logins, setLogins] = useState(null)
+      const [loginDrafts, setLoginDrafts] = useState({})
+      const [openSite, setOpenSite] = useState('')
+      const [loginLog, setLoginLog] = useState('')
+      const [pluginTaste, setPluginTaste] = useState(null)
+      const [tasteState, setTasteState] = useState(null)
+      const [tasteLog, setTasteLog] = useState('')
+      const [biliCred, setBiliCred] = useState(null)
+      const [biliLog, setBiliLog] = useState('')
+      const [biliDraft, setBiliDraft] = useState('')
 
       const applyStatus = useCallback((data) => {
         setStatus(data)
+        setTasteState(data.taste || null)
+        setBiliCred(data.biliCredential || null)
         const resolved = data.resolved || {}
         setForm({
           bridgeDir: resolved.bridgeDir || '',
@@ -161,6 +185,7 @@ window.__ModuleLoader__.load({
         })
         const pc = data.pluginConfig
         setPluginForm(pc && pc.exists ? { ...pc.values } : null)
+        setPluginTaste(pc && pc.exists ? { ...(pc.taste || {}) } : null)
       }, [])
 
       const load = useCallback(async () => {
@@ -169,9 +194,26 @@ window.__ModuleLoader__.load({
         applyStatus(await res.json())
       }, [applyStatus])
 
+      const loadLogins = useCallback(async () => {
+        try {
+          const res = await fetch(`${API}logins`)
+          const data = await res.json()
+          if (!res.ok || !data.ok) throw new Error(data.error || `读取登录信息失败：HTTP ${res.status}`)
+          setLogins(data)
+          const drafts = {}
+          for (const site of data.sites || []) {
+            drafts[site.key] = data.values && data.values[site.key] ? data.values[site.key].cookie || '' : ''
+          }
+          setLoginDrafts(drafts)
+        } catch (err) {
+          setError(String(err && err.message ? err.message : err))
+        }
+      }, [])
+
       useEffect(() => {
         load().catch((err) => setError(String(err && err.message ? err.message : err)))
-      }, [load])
+        loadLogins()
+      }, [load, loadLogins])
 
       const run = useCallback(async (name, action) => {
         setBusy(name)
@@ -249,6 +291,20 @@ window.__ModuleLoader__.load({
         await load()
       }), [writeText, writeSource, load, run])
 
+      const onSaveLogin = useCallback((siteKey, override) => run(`login:${siteKey}`, async () => {
+        setLoginLog('')
+        const value = override !== undefined ? override : loginDrafts[siteKey] || ''
+        const res = await fetch(`${API}logins`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ [siteKey]: value }),
+        })
+        const data = await res.json()
+        if (!res.ok || !data.ok) throw new Error(data.error || `保存失败：HTTP ${res.status}`)
+        setLogins((prev) => (prev ? { ...prev, exists: true, values: data.values || {} } : prev))
+        setLoginLog(String(value || '').trim() ? '已保存，下次去看那个平台就带着登录态' : '已清除这个平台的登录')
+      }), [loginDrafts, run])
+
       const onRegenerate = useCallback(() => run('regenerate', async () => {
         setRegenerateLog('')
         const res = await fetch(`${API}regenerate`, { method: 'POST' })
@@ -270,6 +326,72 @@ window.__ModuleLoader__.load({
           : raw
         setPluginForm((prev) => ({ ...(prev || {}), [key]: value }))
       }
+
+      const updateTasteField = (key, type) => (event) => {
+        const raw = type === 'boolean' ? event.target.checked : event.target.value
+        const value = type === 'number' ? (raw === '' ? 0 : Number(raw)) : raw
+        setPluginTaste((prev) => ({ ...(prev || {}), [key]: value }))
+      }
+
+      const onSaveTaste = useCallback(() => run('save-taste', async () => {
+        if (!pluginTaste) throw new Error('没有读到插件配置')
+        const res = await fetch(`${API}plugin-config`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ taste: pluginTaste }),
+        })
+        const data = await res.json()
+        if (!res.ok || !data.ok) throw new Error(data.error || `保存失败：HTTP ${res.status}`)
+        setNotice('「喜欢就自己动手」已保存，重启 MaiBot 后生效')
+        await load()
+      }), [pluginTaste, load, run])
+
+      const refreshTaste = useCallback(() => run('taste-refresh', async () => {
+        const res = await fetch(`${API}taste`)
+        const data = await res.json()
+        if (!res.ok || !data.ok) throw new Error(data.error || `读取失败：HTTP ${res.status}`)
+        setTasteState(data)
+        setTasteLog('记账已刷新')
+      }), [run])
+
+      const onBiliRelogin = useCallback(() => run('bili-relogin', async () => {
+        setBiliLog('')
+        const res = await fetch(`${API}bili-relogin`, { method: 'POST' })
+        const data = await res.json()
+        if (!res.ok || !data.ok) throw new Error(data.error || `启动失败：HTTP ${res.status}`)
+        setBiliLog('已经弹出浏览器窗口，去里面扫码登录（最多等 4 分钟）')
+        let tries = 0
+        const timer = setInterval(async () => {
+          tries += 1
+          try {
+            const poll = await fetch(`${API}bili-relogin`)
+            const info = await poll.json()
+            if (info.output) setBiliLog(String(info.output).trim().slice(-600))
+            if (!info.running || tries > 75) {
+              clearInterval(timer)
+              await load()
+            }
+          } catch {
+            clearInterval(timer)
+          }
+        }, 4000)
+      }), [load, run])
+
+      const onSaveBiliManual = useCallback(() => run('bili-save', async () => {
+        setBiliLog('')
+        const value = biliDraft.trim()
+        if (!value) throw new Error('先把 SESSDATA 粘进来')
+        const res = await fetch(`${API}bili-credential`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ sessdata: value }),
+        })
+        const data = await res.json()
+        if (!res.ok || !data.ok) throw new Error(data.error || `保存失败：HTTP ${res.status}`)
+        setBiliCred(data)
+        setBiliDraft('')
+        setBiliLog('已保存，重启 MaiBot 后生效')
+      }), [biliDraft, run])
 
       const memory = status && status.memory
       const plugin = status && status.plugin
@@ -361,6 +483,64 @@ window.__ModuleLoader__.load({
               ),
             )
             : h('p', { style: muted }, '没找到 plugins/maimai_bridge/config.toml —— 先把 MaiBot 目录填对并保存。'),
+        ),
+
+        h('div', { style: card },
+          h('div', { style: cardTitle }, '喜欢就自己动手'),
+          h('p', { style: muted },
+            '她看完真喜欢的，自己点个赞、收进收藏夹。额度和间隔在这里管，记账在 ',
+            h('code', { style: { fontSize: 11 } }, 'data/plugins/maimai_bridge/taste.json'),
+            '。改完要重启 MaiBot 才生效。'),
+          pluginTaste
+            ? h('div', null,
+              ...TASTE_FIELDS.map((field) => h('div', { key: field.key, style: fieldRow },
+                h('span', { style: labelStyle }, field.label),
+                field.type === 'boolean'
+                  ? h('label', { style: { ...buttonRow, gap: 8 } },
+                    h('input', {
+                      type: 'checkbox',
+                      checked: !!pluginTaste[field.key],
+                      onChange: updateTasteField(field.key, field.type),
+                    }),
+                    h('span', { style: { fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' } }, field.hint),
+                  )
+                  : h('input', {
+                    style: inputStyle,
+                    type: field.type === 'number' ? 'number' : 'text',
+                    value: pluginTaste[field.key] === undefined || pluginTaste[field.key] === null
+                      ? ''
+                      : String(pluginTaste[field.key]),
+                    placeholder: field.hint,
+                    onChange: updateTasteField(field.key, field.type),
+                  }),
+              )),
+              h('div', { style: buttonRow },
+                h('button', {
+                  type: 'button',
+                  style: primaryButtonStyle,
+                  disabled: busy === 'save-taste',
+                  onClick: onSaveTaste,
+                }, busy === 'save-taste' ? '保存中…' : '保存这些开关'),
+                h('button', {
+                  type: 'button',
+                  style: buttonStyle,
+                  disabled: busy === 'taste-refresh',
+                  onClick: refreshTaste,
+                }, busy === 'taste-refresh' ? '刷新中…' : '刷新今天记账'),
+              ),
+              tasteState
+                ? h('p', { style: { ...muted, marginTop: 10 } },
+                  `今天（${tasteState.date || '—'}）已经自己动手 ${tasteState.used || 0} 次`,
+                  tasteState.liked && tasteState.liked.length
+                    ? `；最近点赞：${tasteState.liked.slice(0, 3).map((x) => (x && (x.title || x.bvid)) || '').filter(Boolean).join('、')}`
+                    : '；今天还没点过赞',
+                )
+                : null,
+              tasteLog
+                ? h('p', { style: { margin: '6px 0 0', fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' } }, tasteLog)
+                : null,
+            )
+            : h('p', { style: muted }, '没读到 [taste] 段 —— 先把 MaiBot 目录填对，或重启 MaiBot 让新配置生成。'),
         ),
 
         h('div', { style: card },
@@ -497,6 +677,129 @@ window.__ModuleLoader__.load({
             ),
             writeLog ? h('pre', { style: preStyle }, writeLog) : null,
           ),
+        ),
+
+        h('div', { style: card },
+          h('div', { style: cardTitle }, '平台登录'),
+          h('p', { style: muted },
+            '填了哪个平台的 Cookie，去看那个平台时就带着登录态——能看到的更多，也更不容易被挡。点平台名展开；只填你愿意给她用的那个号。'),
+          h('div', {
+            style: {
+              margin: '10px 0 14px',
+              padding: '10px 12px',
+              borderRadius: 8,
+              border: '1px solid var(--dsw-alias-border-l1)',
+              background: 'var(--dsw-alias-bg-layer-2)',
+            },
+          },
+            h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, fontWeight: 600 } },
+              h('span', { style: statusDot(!!(biliCred && biliCred.loggedIn)) }),
+              h('span', null, 'B站（字幕靠它）'),
+              h('span', {
+                style: { fontSize: 11, fontWeight: 400, color: 'var(--dsw-alias-label-tertiary)', flex: 1 },
+              },
+                biliCred && biliCred.exists
+                  ? (biliCred.loggedIn
+                    ? `已登录 · SESSDATA ${biliCred.mask || '****'}${biliCred.hasJct ? ' · 带 csrf' : ' · 缺 csrf，点赞会失败'}`
+                    : '凭证文件在，但 sessdata 是空的')
+                  : '还没登录过'),
+            ),
+            h('div', { style: { ...buttonRow, marginTop: 8 } },
+              h('button', {
+                type: 'button',
+                style: primaryButtonStyle,
+                disabled: busy === 'bili-relogin',
+                onClick: onBiliRelogin,
+              }, busy === 'bili-relogin' ? '启动中…' : '扫码登录（会弹浏览器）'),
+              h('button', {
+                type: 'button',
+                style: buttonStyle,
+                disabled: busy === 'bili-save',
+                onClick: onSaveBiliManual,
+              }, busy === 'bili-save' ? '保存中…' : '手工填 SESSDATA'),
+            ),
+            h('div', { style: { display: 'flex', gap: 8, marginTop: 8 } },
+              h('input', {
+                style: { ...inputStyle, flex: 1 },
+                value: biliDraft,
+                placeholder: '或者直接把 SESSDATA=xxxx 粘这里，再点「手工填 SESSDATA」',
+                onChange: (event) => setBiliDraft(event.target.value),
+              }),
+            ),
+            biliCred && biliCred.file
+              ? h('p', {
+                style: {
+                  margin: '8px 0 0',
+                  fontSize: 11,
+                  color: 'var(--dsw-alias-label-tertiary)',
+                  wordBreak: 'break-all',
+                },
+              }, biliCred.file)
+              : null,
+            biliLog ? h('pre', { style: { ...preStyle, maxHeight: 160, marginTop: 8 } }, biliLog) : null,
+          ),
+          logins && logins.sites
+            ? logins.sites.map((site) => {
+              const saved = logins.values && logins.values[site.key]
+              const open = openSite === site.key
+              const draft = loginDrafts[site.key] || ''
+              return h('div', {
+                key: site.key,
+                style: { borderBottom: '1px solid var(--dsw-alias-border-l1)' },
+              },
+                h('div', {
+                  style: { display: 'flex', alignItems: 'center', gap: 10, padding: '9px 0', cursor: 'pointer' },
+                  onClick: () => setOpenSite(open ? '' : site.key),
+                },
+                  h('span', { style: statusDot(!!saved) }),
+                  h('span', { style: { fontSize: 12, width: 84, color: 'var(--dsw-alias-label-primary)' } }, site.label),
+                  h('span', {
+                    style: { fontSize: 11, color: 'var(--dsw-alias-label-tertiary)', flex: 1 },
+                  }, saved ? `已保存 · ${String(saved.cookie || '').length} 字符` : '未设置'),
+                  h('span', { style: { fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' } }, open ? '收起' : '展开'),
+                ),
+                open
+                  ? h('div', { style: { paddingBottom: 12 } },
+                    h('textarea', {
+                      style: {
+                        ...inputStyle,
+                        minHeight: 64,
+                        resize: 'vertical',
+                        lineHeight: 1.6,
+                        marginBottom: 8,
+                        fontFamily: 'monospace',
+                      },
+                      value: draft,
+                      placeholder: '粘贴 Cookie 字符串，形如 name=value; name2=value2',
+                      onChange: (event) => setLoginDrafts({ ...loginDrafts, [site.key]: event.target.value }),
+                    }),
+                    h('div', { style: buttonRow },
+                      h('button', {
+                        type: 'button',
+                        style: primaryButtonStyle,
+                        disabled: busy === `login:${site.key}`,
+                        onClick: () => onSaveLogin(site.key),
+                      }, busy === `login:${site.key}` ? '保存中…' : '保存'),
+                      h('button', {
+                        type: 'button',
+                        style: buttonStyle,
+                        disabled: busy === `login:${site.key}` || !saved,
+                        onClick: () => {
+                          setLoginDrafts({ ...loginDrafts, [site.key]: '' })
+                          onSaveLogin(site.key, '')
+                        },
+                      }, '清除'),
+                      h('span', { style: { fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' } },
+                        '取法：浏览器 F12 → Network → 任一请求 → 复制 Cookie 请求头'),
+                    ),
+                  )
+                  : null,
+              )
+            })
+            : h('p', { style: muted }, '正在读取…'),
+          loginLog
+            ? h('p', { style: { margin: '10px 0 0', fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' } }, loginLog)
+            : null,
         ),
 
         notice

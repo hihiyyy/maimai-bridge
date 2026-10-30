@@ -1,5 +1,5 @@
 [plugin]
-config_version = "1.1.0"
+config_version = "1.2.0"
 
 # —— 总开关 ——
 enabled = true
@@ -17,3 +17,48 @@ dsh_extra_args = ""
 
 # —— 双向互联：让麦麦说话 ——
 speak_model = ""
+
+[browse]
+enabled = true
+browser_channel = "msedge"
+headless = true
+timeout_seconds = 45
+max_chars = 1200
+wait_after_load_ms = 1200
+cooldown_seconds = 20
+max_per_hour = 12
+
+[video]
+# 看B站视频：读字幕 + 简介 + 弹幕 + 热评，再交给她用自己的语气聊
+enabled = true
+# 简介最多读多少字
+desc_max_chars = 500
+# 弹幕抽样条数
+danmaku_limit = 40
+# 热门评论条数
+comment_limit = 12
+# 相关推荐条数
+related_limit = 4
+# 关键词搜索时直接取第一条（否则要先确认）
+keyword_take_first = true
+# 登录凭证文件（相对插件 data 目录）。这里指向「刷B站」插件的凭证文件，
+# 两个插件共用同一份 SESSDATA：那边登录一次，这边就能读到字幕。
+credential_file = "plugins/maibot.bilibili-browser/bili_credential.json"
+
+[taste]
+# 喜欢就自己动手：看完一个东西真心觉得好，自己去点赞 / 收藏
+enabled = true
+# 能不能自己点赞
+auto_like = true
+# 能不能自己收藏
+auto_fav = true
+# 收藏到哪个收藏夹（留空 = 默认收藏夹；填名字或 id 都行）
+fav_folder = ""
+# 每天最多自己动手几次（0 = 不限）
+daily_limit = 10
+# 两次动手之间至少隔多少秒（一激动连点一串会被当成刷赞）
+cooldown_seconds = 300
+# 必须说一句为什么喜欢：不是走流程，是让她自己记住为什么
+require_reason = true
+# 试运行：只记账、只嘴上说，不真的发出去
+dry_run = false

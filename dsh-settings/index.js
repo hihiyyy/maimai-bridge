@@ -190,7 +190,7 @@ function probePort(port, host = '127.0.0.1', timeoutMs = 1200) {
 
 const PLUGIN_ID = 'maimai_bridge'
 
-/** 可写字段：键名 → 期望类型。值按行替换，缺失则追加到 [plugin] 之后。 */
+/** [plugin] 段可写字段：键名 → 期望类型。值按行替换，缺失则追加到 [plugin] 之后。 */
 const PLUGIN_KEYS = {
   enabled: 'boolean',
   recall_limit: 'number',
@@ -202,6 +202,21 @@ const PLUGIN_KEYS = {
   dsh_extra_args: 'string',
   speak_model: 'string',
 }
+
+/** [taste] 段可写字段：她自己点赞 / 收藏的那套开关。 */
+const TASTE_KEYS = {
+  enabled: 'boolean',
+  auto_like: 'boolean',
+  auto_fav: 'boolean',
+  fav_folder: 'string',
+  daily_limit: 'number',
+  cooldown_seconds: 'number',
+  require_reason: 'boolean',
+  dry_run: 'boolean',
+}
+
+/** 段名 → 该段能写的键。注意必须按段区分：enabled 在 plugin 和 taste 里都有。 */
+const SECTION_FIELDS = { plugin: PLUGIN_KEYS, taste: TASTE_KEYS }
 
 function pluginConfigPath(maibotHome) {
   return join(maibotHome, 'plugins', PLUGIN_ID, 'config.toml')
@@ -224,7 +239,7 @@ function formatTomlValue(type, value) {
 
 function readPluginConfig(maibotHome) {
   const file = pluginConfigPath(maibotHome)
-  const config = { file, exists: existsSync(file), values: {}, raw: '' }
+  const config = { file, exists: existsSync(file), values: {}, taste: {}, raw: '' }
   if (!config.exists) return config
   let text = ''
   try {
@@ -233,15 +248,24 @@ function readPluginConfig(maibotHome) {
     return config
   }
   config.raw = text
+  let section = 'plugin'
   for (const line of text.split(/\r?\n/)) {
+    const head = line.match(/^\s*\[([A-Za-z0-9_.]+)\]\s*$/)
+    if (head) {
+      section = head[1]
+      continue
+    }
     const match = line.match(/^\s*([A-Za-z0-9_]+)\s*=\s*(.+?)\s*$/)
     if (!match) continue
+    const fields = SECTION_FIELDS[section]
+    if (!fields) continue
     const [, key, rawValue] = match
-    if (!(key in PLUGIN_KEYS)) continue
+    if (!(key in fields)) continue
     let value = rawValue.replace(/\s+#.*$/, '').trim()
     if (/^".*"$/.test(value)) value = value.slice(1, -1)
     else if (/^'.*'$/.test(value)) value = value.slice(1, -1)
-    config.values[key] = coerceTomlValue(PLUGIN_KEYS[key], value)
+    const bucket = section === 'taste' ? config.taste : config.values
+    bucket[key] = coerceTomlValue(fields[key], value)
   }
   return config
 }
@@ -249,29 +273,57 @@ function readPluginConfig(maibotHome) {
 function writePluginConfig(maibotHome, patch) {
   const file = pluginConfigPath(maibotHome)
   if (!existsSync(file)) throw new Error(`找不到插件配置：${file}`)
-  const lines = readFileSync(file, 'utf8').split(/\r?\n/)
+
   const pending = new Map()
-  for (const [key, type] of Object.entries(PLUGIN_KEYS)) {
-    if (!(key in patch)) continue
-    const value = coerceTomlValue(type, patch[key])
-    if (value === null) continue
-    pending.set(key, formatTomlValue(type, value))
+  const collect = (section, source) => {
+    const fields = SECTION_FIELDS[section]
+    if (!fields || !source || typeof source !== 'object') return
+    for (const [key, type] of Object.entries(fields)) {
+      if (!(key in source)) continue
+      const value = coerceTomlValue(type, source[key])
+      if (value === null) continue
+      pending.set(`${section}\u0000${key}`, formatTomlValue(type, value))
+    }
   }
+  collect('plugin', patch)
+  collect('taste', patch.taste)
+  if (!pending.size) return readPluginConfig(maibotHome)
+
+  const lines = readFileSync(file, 'utf8').split(/\r?\n/)
   const seen = new Set()
+  let section = 'plugin'
   const next = lines.map((line) => {
+    const head = line.match(/^\s*\[([A-Za-z0-9_.]+)\]\s*$/)
+    if (head) {
+      section = head[1]
+      return line
+    }
     const match = line.match(/^(\s*)([A-Za-z0-9_]+)(\s*=\s*)(.+?)(\s*)$/)
     if (!match) return line
     const [, indent, key, eq, , trailing] = match
-    if (!pending.has(key)) return line
-    seen.add(key)
-    return `${indent}${key}${eq}${pending.get(key)}${trailing}`
+    const id = `${section}\u0000${key}`
+    if (!pending.has(id)) return line
+    seen.add(id)
+    return `${indent}${key}${eq}${pending.get(id)}${trailing}`
   })
-  const missing = [...pending.keys()].filter((key) => !seen.has(key))
-  if (missing.length) {
-    const tail = next.length && next[next.length - 1].trim() === '' ? next.pop() : undefined
-    for (const key of missing) next.push(`${key} = ${pending.get(key)}`)
-    if (tail !== undefined) next.push(tail)
+
+  // 缺的键补到各自段里；段本身不存在就先建段
+  for (const sectionName of Object.keys(SECTION_FIELDS)) {
+    const fields = SECTION_FIELDS[sectionName]
+    const missing = Object.keys(fields).filter(
+      (key) => pending.has(`${sectionName}\u0000${key}`) && !seen.has(`${sectionName}\u0000${key}`),
+    )
+    if (!missing.length) continue
+    let head = next.findIndex((line) => line.trim() === `[${sectionName}]`)
+    if (head < 0) {
+      while (next.length && next[next.length - 1].trim() === '') next.pop()
+      next.push('', `[${sectionName}]`)
+      head = next.length - 1
+    }
+    const block = missing.map((key) => `${key} = ${pending.get(`${sectionName}\u0000${key}`)}`)
+    next.splice(head + 1, 0, ...block)
   }
+
   writeFileSync(file, next.join('\n'), 'utf8')
   return readPluginConfig(maibotHome)
 }
@@ -307,6 +359,193 @@ function requireHome(settings) {
   }
 }
 
+// ---------------------------------------------------------------- 喜欢就自己动手
+
+/** 插件按天写的记账文件（点赞/收藏都记在这里）。 */
+function tasteStatePath(maibotHome) {
+  return join(maibotHome, 'data', 'plugins', PLUGIN_ID, 'taste.json')
+}
+
+/** 本地日期。不能用 toISOString()，那是 UTC，会跟插件的 strftime 差 8 小时。 */
+function localDate() {
+  const now = new Date()
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
+}
+
+function readTasteState(maibotHome) {
+  const file = tasteStatePath(maibotHome)
+  let data = {}
+  try {
+    data = JSON.parse(readFileSync(file, 'utf8'))
+  } catch {
+    data = {}
+  }
+  const today = localDate()
+  const fresh = data?.date === today
+  const liked = fresh && Array.isArray(data.liked) ? data.liked : []
+  const faved = fresh && Array.isArray(data.faved) ? data.faved : []
+  return {
+    file,
+    exists: existsSync(file),
+    date: fresh ? today : '',
+    liked: liked.slice(-8).reverse(),
+    faved: faved.slice(-8).reverse(),
+    used: liked.length + faved.length,
+  }
+}
+
+// ---------------------------------------------------------------- B站登录态
+
+function biliCredentialPath(maibotHome) {
+  return join(maibotHome, 'data', 'plugins', 'maibot.bilibili-browser', 'bili_credential.json')
+}
+
+function readBiliCredential(maibotHome) {
+  const file = biliCredentialPath(maibotHome)
+  let data = {}
+  try {
+    data = JSON.parse(readFileSync(file, 'utf8'))
+  } catch {
+    data = {}
+  }
+  const sessdata = String(data.sessdata || '')
+  const jct = String(data.bili_jct || '')
+  let mtime = 0
+  try {
+    mtime = statSync(file).mtimeMs
+  } catch {
+    mtime = 0
+  }
+  return {
+    file,
+    exists: existsSync(file),
+    loggedIn: Boolean(sessdata),
+    mask: sessdata ? `${sessdata.slice(0, 6)}……${sessdata.slice(-4)}` : '',
+    hasJct: Boolean(jct),
+    mtime,
+  }
+}
+
+function writeBiliCredential(maibotHome, sessdata, biliJct) {
+  const file = biliCredentialPath(maibotHome)
+  let data = {}
+  try {
+    data = JSON.parse(readFileSync(file, 'utf8'))
+  } catch {
+    data = {}
+  }
+  const text = String(sessdata ?? '').trim()
+  if (text) data.sessdata = text
+  else delete data.sessdata
+  const jct = String(biliJct ?? '').trim()
+  if (jct) data.bili_jct = jct
+  mkdirSync(dirname(file), { recursive: true })
+  writeFileSync(file, JSON.stringify(data, null, 2), 'utf8')
+  return readBiliCredential(maibotHome)
+}
+
+/** 扫码登录进程状态：一次只许开一个窗口。 */
+const biliLogin = { running: false, exit: null, output: '' }
+
+function startBiliLogin(settings) {
+  if (biliLogin.running) return { ok: false, error: '上一次还开着，先去那个窗口里登录' }
+  const script = join(settings.bridgeDir || '', 'bili_login.py')
+  if (!existsSync(script)) return { ok: false, error: `找不到 ${script}` }
+  if (!settings.pythonExe) return { ok: false, error: '还没填 Python 解释器' }
+  biliLogin.running = true
+  biliLogin.exit = null
+  biliLogin.output = ''
+  let child
+  try {
+    child = spawn(settings.pythonExe, [script, '--maibot', settings.maibotHome, '--timeout', '240'], {
+      env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' },
+      windowsHide: false,
+    })
+  } catch (err) {
+    biliLogin.running = false
+    return { ok: false, error: String(err) }
+  }
+  const collect = (chunk) => {
+    biliLogin.output = (biliLogin.output + chunk.toString()).slice(-4000)
+  }
+  child.stdout?.on('data', collect)
+  child.stderr?.on('data', collect)
+  child.on('error', (err) => {
+    biliLogin.running = false
+    biliLogin.exit = -1
+    biliLogin.output += `\n${err}`
+  })
+  child.on('exit', (code) => {
+    biliLogin.running = false
+    biliLogin.exit = code
+  })
+  return { ok: true }
+}
+
+/** 能填登录态的平台（顺序即界面顺序）。 */
+const LOGIN_SITES = [
+  ['bilibili', 'B站'],
+  ['tieba', '贴吧'],
+  ['xiaoheihe', '小黑盒'],
+  ['steam', 'Steam'],
+  ['zhihu', '知乎'],
+  ['weibo', '微博'],
+  ['douban', '豆瓣'],
+  ['xhs', '小红书'],
+  ['github', 'GitHub'],
+]
+
+/** 登录信息实际存放的位置（插件自己读的那一份）。 */
+function loginsPath(maibotHome) {
+  return join(maibotHome, 'plugins', PLUGIN_ID, 'logins.json')
+}
+
+/** 读回各平台已保存的 cookie。 */
+function readLogins(maibotHome) {
+  const file = loginsPath(maibotHome)
+  let exists = false
+  const values = {}
+  try {
+    if (existsSync(file)) {
+      exists = true
+      const parsed = JSON.parse(readFileSync(file, 'utf8'))
+      if (parsed && typeof parsed === 'object') {
+        for (const [site, entry] of Object.entries(parsed)) {
+          if (entry && typeof entry === 'object') {
+            values[site] = {
+              cookie: String(entry.cookie || ''),
+              ua: String(entry.ua || ''),
+            }
+          }
+        }
+      }
+    }
+  } catch {
+    /* 文件坏了就当没填过 */
+  }
+  return { file, exists, values }
+}
+
+/** 写入 cookie：传空串表示清掉这个平台。 */
+function writeLogins(maibotHome, patch) {
+  const current = readLogins(maibotHome).values
+  const known = new Set(LOGIN_SITES.map(([key]) => key))
+  for (const [site, raw] of Object.entries(patch || {})) {
+    if (!known.has(site)) continue
+    const text = String(raw ?? '').trim()
+    if (text) {
+      current[site] = { cookie: text, ua: String(current[site]?.ua || '') }
+    } else {
+      delete current[site]
+    }
+  }
+  const file = loginsPath(maibotHome)
+  mkdirSync(dirname(file), { recursive: true })
+  writeFileSync(file, JSON.stringify(current, null, 2), 'utf8')
+  return { file, exists: true, values: current }
+}
+
 async function route(req, res) {
   const url = new URL(req.url || ROUTE_PREFIX, 'http://localhost')
   const action = url.pathname.slice(ROUTE_PREFIX.length).replace(/^\/+/, '').replace(/\/+$/, '')
@@ -327,7 +566,10 @@ async function route(req, res) {
         file: pluginConfig.file,
         exists: pluginConfig.exists,
         values: pluginConfig.values,
+        taste: pluginConfig.taste,
       },
+      taste: readTasteState(settings.maibotHome),
+      biliCredential: readBiliCredential(settings.maibotHome),
       preset: presetInfo(settings),
       settingsFile: settingsFilePath(),
       dshHome: dshHome(),
@@ -345,6 +587,7 @@ async function route(req, res) {
       file: config.file,
       exists: config.exists,
       values: config.values,
+      taste: config.taste,
     })
     return
   }
@@ -355,6 +598,69 @@ async function route(req, res) {
     const body = await readBody(req)
     const config = writePluginConfig(settings.maibotHome, body || {})
     sendJson(res, 200, { ok: true, ...config })
+    return
+  }
+
+  if (action === 'logins' && req.method === 'GET') {
+    const settings = loadSettings()
+    requireHome(settings)
+    const info = readLogins(settings.maibotHome)
+    sendJson(res, 200, {
+      ok: true,
+      file: info.file,
+      exists: info.exists,
+      values: info.values,
+      sites: LOGIN_SITES.map(([key, label]) => ({ key, label })),
+    })
+    return
+  }
+
+  if (action === 'logins' && req.method === 'POST') {
+    const settings = loadSettings()
+    requireHome(settings)
+    const body = await readBody(req)
+    const info = writeLogins(settings.maibotHome, body || {})
+    sendJson(res, 200, { ok: true, ...info })
+    return
+  }
+
+  if (action === 'taste' && req.method === 'GET') {
+    const settings = loadSettings()
+    requireHome(settings)
+    sendJson(res, 200, { ok: true, ...readTasteState(settings.maibotHome) })
+    return
+  }
+
+  if (action === 'bili-credential' && req.method === 'GET') {
+    const settings = loadSettings()
+    requireHome(settings)
+    sendJson(res, 200, { ok: true, ...readBiliCredential(settings.maibotHome) })
+    return
+  }
+
+  if (action === 'bili-credential' && req.method === 'POST') {
+    const settings = loadSettings()
+    requireHome(settings)
+    const body = await readBody(req)
+    const info = writeBiliCredential(settings.maibotHome, body?.sessdata, body?.bili_jct)
+    sendJson(res, 200, { ok: true, ...info })
+    return
+  }
+
+  if (action === 'bili-relogin' && req.method === 'GET') {
+    sendJson(res, 200, { ok: true, running: biliLogin.running, exit: biliLogin.exit, output: biliLogin.output })
+    return
+  }
+
+  if (action === 'bili-relogin' && req.method === 'POST') {
+    const settings = loadSettings()
+    requireHome(settings)
+    const result = startBiliLogin(settings)
+    if (!result.ok) {
+      sendJson(res, 400, { ok: false, error: result.error })
+      return
+    }
+    sendJson(res, 200, { ok: true, running: true })
     return
   }
 

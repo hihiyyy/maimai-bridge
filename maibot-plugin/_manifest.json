@@ -1,18 +1,18 @@
 {
   "manifest_version": 2,
-  "version": "1.1.0",
-  "name": "麦麦 × DSH 桥",
-  "description": "在麦麦和 DeepSeek Harness 之间搭一座桥：互通人格与记忆，并允许两边互相调用",
+  "version": "1.8.0",
+  "name": "Maibot互联DSH",
+  "description": "把 MaiBot 和 DeepSeek Harness 连起来：人格互通、记忆双向、双向调用；能出去看网页（B站 / Steam / GitHub / 微博 / 豆瓣 / 小黑盒）、真的看 B 站视频，看到喜欢的还会自己点赞收藏。",
   "author": {
     "name": "lirick",
-    "url": "https://github.com/MaiM-with-u"
+    "url": "https://github.com/hihiyyy"
   },
-  "license": "GPL-v3.0-or-later",
+  "license": "MIT",
   "urls": {
-    "repository": "https://github.com/MaiM-with-u/maibot",
-    "homepage": "https://github.com/MaiM-with-u/maibot",
-    "documentation": "https://github.com/MaiM-with-u/maibot",
-    "issues": "https://github.com/MaiM-with-u/maibot/issues"
+    "repository": "https://github.com/hihiyyy/maimai-bridge",
+    "homepage": "https://github.com/hihiyyy/maimai-bridge",
+    "documentation": "https://github.com/hihiyyy/maimai-bridge",
+    "issues": "https://github.com/hihiyyy/maimai-bridge/issues"
   },
   "changelog": "CHANGELOG.md",
   "host_application": {
