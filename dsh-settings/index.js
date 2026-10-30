@@ -192,6 +192,7 @@ const PLUGIN_ID = 'maimai_bridge'
 
 /** [plugin] 段可写字段：键名 → 期望类型。值按行替换，缺失则追加到 [plugin] 之后。 */
 const PLUGIN_KEYS = {
+  admin_qq: 'string',
   enabled: 'boolean',
   recall_limit: 'number',
   allow_memory_write: 'boolean',
@@ -215,8 +216,30 @@ const TASTE_KEYS = {
   dry_run: 'boolean',
 }
 
+/** [outing] 段里只开放「自己想起来」这几个：出门流程的其他参数留给 MaiBot 配置界面。 */
+const OUTING_KEYS = {
+  auto_enabled: 'boolean',
+  auto_stream_id: 'string',
+  auto_windows: 'string',
+  auto_daily_limit: 'number',
+  auto_cooldown_minutes: 'number',
+  auto_intent: 'string',
+}
+
+/** [relay] 段可写字段：DSH 借她的嘴说话那条通道。 */
+const RELAY_KEYS = {
+  enabled: 'boolean',
+  daily_limit: 'number',
+  max_chars: 'number',
+}
+
 /** 段名 → 该段能写的键。注意必须按段区分：enabled 在 plugin 和 taste 里都有。 */
-const SECTION_FIELDS = { plugin: PLUGIN_KEYS, taste: TASTE_KEYS }
+const SECTION_FIELDS = {
+  plugin: PLUGIN_KEYS,
+  taste: TASTE_KEYS,
+  outing: OUTING_KEYS,
+  relay: RELAY_KEYS,
+}
 
 function pluginConfigPath(maibotHome) {
   return join(maibotHome, 'plugins', PLUGIN_ID, 'config.toml')
@@ -239,7 +262,7 @@ function formatTomlValue(type, value) {
 
 function readPluginConfig(maibotHome) {
   const file = pluginConfigPath(maibotHome)
-  const config = { file, exists: existsSync(file), values: {}, taste: {}, raw: '' }
+  const config = { file, exists: existsSync(file), values: {}, taste: {}, outing: {}, relay: {}, raw: '' }
   if (!config.exists) return config
   let text = ''
   try {
@@ -264,7 +287,7 @@ function readPluginConfig(maibotHome) {
     let value = rawValue.replace(/\s+#.*$/, '').trim()
     if (/^".*"$/.test(value)) value = value.slice(1, -1)
     else if (/^'.*'$/.test(value)) value = value.slice(1, -1)
-    const bucket = section === 'taste' ? config.taste : config.values
+    const bucket = section === 'plugin' ? config.values : config[section]
     bucket[key] = coerceTomlValue(fields[key], value)
   }
   return config
@@ -287,6 +310,8 @@ function writePluginConfig(maibotHome, patch) {
   }
   collect('plugin', patch)
   collect('taste', patch.taste)
+  collect('outing', patch.outing)
+  collect('relay', patch.relay)
   if (!pending.size) return readPluginConfig(maibotHome)
 
   const lines = readFileSync(file, 'utf8').split(/\r?\n/)
@@ -326,6 +351,24 @@ function writePluginConfig(maibotHome, patch) {
 
   writeFileSync(file, next.join('\n'), 'utf8')
   return readPluginConfig(maibotHome)
+}
+
+/** 全局管理员：从 [plugin] 的 admin_qq 拆出来。留空 = 谁发起申请就等谁回。 */
+function adminInfo(pluginConfig) {
+  const raw = String(
+    (pluginConfig && pluginConfig.values && pluginConfig.values.admin_qq) || '',
+  )
+  const ids = raw
+    .replace(/，/g, ',')
+    .split(',')
+    .map((x) => x.trim())
+    .filter(Boolean)
+  return {
+    ids,
+    configured: ids.length > 0,
+    display: ids.join('、'),
+    file: (pluginConfig && pluginConfig.file) || '',
+  }
 }
 
 function presetInfo(settings) {
@@ -395,6 +438,57 @@ function readTasteState(maibotHome) {
   }
 }
 
+// ---------------------------------------------------------------- 出门 / 自己想起来
+
+/** 出门记录：今天出去几次、有没有在等回、通行证还剩多久、自动叫醒叫过几次。 */
+function readOutingState(maibotHome) {
+  const file = join(maibotHome, 'data', 'plugins', PLUGIN_ID, 'outing.json')
+  let data = {}
+  try {
+    data = JSON.parse(readFileSync(file, 'utf8'))
+  } catch {
+    data = {}
+  }
+  const today = localDate()
+  const fresh = data && data.date === today
+  const lease = fresh && data.lease && typeof data.lease === 'object' ? data.lease : null
+  const pending = fresh && data.pending && typeof data.pending === 'object' ? data.pending : null
+  const auto = data && data.auto && typeof data.auto === 'object' ? data.auto : null
+  const autoFresh = auto && auto.date === today
+  return {
+    file,
+    exists: existsSync(file),
+    date: fresh ? today : '',
+    used: fresh ? Number(data.used || 0) : 0,
+    waiting: !!pending,
+    leaseLeftMs: lease ? Math.max(0, Number(lease.until || 0) * 1000 - Date.now()) : 0,
+    autoCount: autoFresh ? Number(auto.count || 0) : 0,
+    autoLastAt: autoFresh ? Number(auto.last_at || 0) * 1000 : 0,
+  }
+}
+
+// ---------------------------------------------------------------- 替她说一句
+
+/** 代发记录：今天替她说了几句、最近几条是什么。 */
+function readRelayState(maibotHome) {
+  const file = join(maibotHome, 'data', 'plugins', PLUGIN_ID, 'relay.json')
+  let data = {}
+  try {
+    data = JSON.parse(readFileSync(file, 'utf8'))
+  } catch {
+    data = {}
+  }
+  const today = localDate()
+  const fresh = data && data.date === today
+  const sent = fresh && Array.isArray(data.sent) ? data.sent : []
+  return {
+    file,
+    exists: existsSync(file),
+    date: fresh ? today : '',
+    count: fresh ? Number(data.count || 0) : 0,
+    recent: sent.slice(-6).reverse().map((row) => String(row?.text || '')),
+  }
+}
 // ---------------------------------------------------------------- B站登录态
 
 function biliCredentialPath(maibotHome) {
@@ -445,40 +539,48 @@ function writeBiliCredential(maibotHome, sessdata, biliJct) {
   return readBiliCredential(maibotHome)
 }
 
-/** 扫码登录进程状态：一次只许开一个窗口。 */
-const biliLogin = { running: false, exit: null, output: '' }
+/** 扫码登录进程状态：一次只许开一个窗口，记着这次登录的是哪个平台。 */
+const loginRun = { running: false, site: '', exit: null, output: '' }
 
-function startBiliLogin(settings) {
-  if (biliLogin.running) return { ok: false, error: '上一次还开着，先去那个窗口里登录' }
-  const script = join(settings.bridgeDir || '', 'bili_login.py')
+function startCookieLogin(settings, site) {
+  if (loginRun.running) {
+    return { ok: false, error: `上一次（${loginRun.site || '别的平台'}）还开着，先去那个窗口里登录` }
+  }
+  if (!site) return { ok: false, error: '没说要登录哪个平台' }
+  const script = join(settings.bridgeDir || '', 'cookie_login.py')
   if (!existsSync(script)) return { ok: false, error: `找不到 ${script}` }
   if (!settings.pythonExe) return { ok: false, error: '还没填 Python 解释器' }
-  biliLogin.running = true
-  biliLogin.exit = null
-  biliLogin.output = ''
+  loginRun.running = true
+  loginRun.site = site
+  loginRun.exit = null
+  loginRun.output = ''
   let child
   try {
-    child = spawn(settings.pythonExe, [script, '--maibot', settings.maibotHome, '--timeout', '240'], {
-      env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' },
-      windowsHide: false,
-    })
+    child = spawn(
+      settings.pythonExe,
+      [script, '--site', site, '--maibot', settings.maibotHome, '--timeout', '240'],
+      {
+        env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' },
+        windowsHide: false,
+      },
+    )
   } catch (err) {
-    biliLogin.running = false
+    loginRun.running = false
     return { ok: false, error: String(err) }
   }
   const collect = (chunk) => {
-    biliLogin.output = (biliLogin.output + chunk.toString()).slice(-4000)
+    loginRun.output = (loginRun.output + chunk.toString()).slice(-4000)
   }
   child.stdout?.on('data', collect)
   child.stderr?.on('data', collect)
   child.on('error', (err) => {
-    biliLogin.running = false
-    biliLogin.exit = -1
-    biliLogin.output += `\n${err}`
+    loginRun.running = false
+    loginRun.exit = -1
+    loginRun.output += `\n${err}`
   })
   child.on('exit', (code) => {
-    biliLogin.running = false
-    biliLogin.exit = code
+    loginRun.running = false
+    loginRun.exit = code
   })
   return { ok: true }
 }
@@ -567,9 +669,14 @@ async function route(req, res) {
         exists: pluginConfig.exists,
         values: pluginConfig.values,
         taste: pluginConfig.taste,
+        outing: pluginConfig.outing,
+        relay: pluginConfig.relay,
       },
       taste: readTasteState(settings.maibotHome),
+      outingState: readOutingState(settings.maibotHome),
+      relayState: readRelayState(settings.maibotHome),
       biliCredential: readBiliCredential(settings.maibotHome),
+      admin: adminInfo(pluginConfig),
       preset: presetInfo(settings),
       settingsFile: settingsFilePath(),
       dshHome: dshHome(),
@@ -647,20 +754,28 @@ async function route(req, res) {
     return
   }
 
-  if (action === 'bili-relogin' && req.method === 'GET') {
-    sendJson(res, 200, { ok: true, running: biliLogin.running, exit: biliLogin.exit, output: biliLogin.output })
+  if (action === 'cookie-login' && req.method === 'GET') {
+    sendJson(res, 200, {
+      ok: true,
+      running: loginRun.running,
+      site: loginRun.site,
+      exit: loginRun.exit,
+      output: loginRun.output,
+    })
     return
   }
 
-  if (action === 'bili-relogin' && req.method === 'POST') {
+  if (action === 'cookie-login' && req.method === 'POST') {
     const settings = loadSettings()
     requireHome(settings)
-    const result = startBiliLogin(settings)
+    const body = await readBody(req)
+    const site = String(body?.site || '').trim()
+    const result = startCookieLogin(settings, site)
     if (!result.ok) {
       sendJson(res, 400, { ok: false, error: result.error })
       return
     }
-    sendJson(res, 200, { ok: true, running: true })
+    sendJson(res, 200, { ok: true, running: true, site })
     return
   }
 

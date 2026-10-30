@@ -119,6 +119,7 @@ window.__ModuleLoader__.load({
 
     /** 插件配置里可编辑的字段：键名 → 展示名 + 类型 + 说明。 */
     const PLUGIN_FIELDS = [
+      { key: 'admin_qq', label: '管理员 QQ', type: 'string', multi: true, hint: '每行一个 QQ 号，点「+ 再加一个」加更多。批准出门这类事只认这些人；留空 = 谁申请等谁回' },
       { key: 'enabled', label: '启用桥接', type: 'boolean', hint: '关掉后 dsh_task 会被拒绝' },
       { key: 'recall_limit', label: '默认检索条数', type: 'number', hint: 'maimai_recall 不传 limit 时用这个（1–20）' },
       { key: 'allow_memory_write', label: '允许写记忆', type: 'boolean', hint: '关掉后 maimai_remember 只读不写' },
@@ -128,6 +129,16 @@ window.__ModuleLoader__.load({
       { key: 'dsh_cwd', label: 'DSH 工作目录', type: 'string', hint: '留空则继承 MaiBot 的目录' },
       { key: 'dsh_extra_args', label: '追加参数', type: 'string', hint: '按空格拆开，例如 --session-id <id> 续用同一会话' },
       { key: 'speak_model', label: '口吻模型', type: 'string', hint: 'maimai_speak 用哪个模型，留空用宿主默认' },
+    ]
+
+    /** [outing] 段的「自己想起来」：定时叫醒她那套。 */
+    const AUTO_FIELDS = [
+      { key: 'auto_enabled', label: '让她自己想起来', type: 'boolean', hint: '开着才会到点自己冒出来申请；关着得有人先撩她一句' },
+      { key: 'auto_stream_id', label: '在哪个群里叫她', type: 'string', multi: true, hint: '每行一个群号，可以填多个（轮流挑一个叫）。留空就用她自己记下的最近说过话的群' },
+      { key: 'auto_windows', label: '什么时段', type: 'string', hint: '逗号分隔，跨夜写成 18:00-09:00' },
+      { key: 'auto_daily_limit', label: '每天最多几次', type: 'number', hint: '0 = 不限' },
+      { key: 'auto_cooldown_minutes', label: '两次至少隔（分钟）', type: 'number', hint: '防止她一直想出去' },
+      { key: 'auto_intent', label: '叫醒时说的一句', type: 'string', hint: '留空用默认文案' },
     ]
 
     /** [taste] 段：她自己点赞 / 收藏的那套开关。 */
@@ -142,6 +153,89 @@ window.__ModuleLoader__.load({
       { key: 'dry_run', label: '试运行', type: 'boolean', hint: '只记账不真发，先看看她的口味再放开' },
     ]
 
+    /** [relay] 段：DSH 借她的嘴说话那条通道。 */
+    const RELAY_FIELDS = [
+      { key: 'enabled', label: '允许 DSH 借她的嘴', type: 'boolean', hint: '关掉后 DSH 只能把话交给她，由她自己说' },
+      { key: 'daily_limit', label: '每天最多几句', type: 'number', hint: '0 = 不限；建议别开太大，群里会以为是她本人' },
+      { key: 'max_chars', label: '一句最多多少字', type: 'number', hint: '超了就不发，防止一条刷屏' },
+    ]
+
+    /** 逗号分隔的字符串 ↔ 数组（全角逗号也认）。 */
+    function splitList(value) {
+      return String(value ?? '')
+        .replace(/，/g, ',')
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean)
+    }
+
+    function joinList(items) {
+      return items.map((s) => String(s).trim()).filter(Boolean).join(',')
+    }
+
+    /**
+     * 一行一个的多值输入：每个值一个输入框，右边 × 删掉，底下「+ 再加一个」新开一行。
+     * 对 config.toml 写出去仍然是逗号串，所以后端和插件都不用动。
+     */
+    function MultiInput({ value, placeholder, onChange }) {
+      const [items, setItems] = useState(() => {
+        const list = splitList(value)
+        return list.length ? list : ['']
+      })
+
+      useEffect(() => {
+        const next = splitList(value)
+        if (!next.length) return
+        setItems((prev) => (joinList(prev) === joinList(next) ? prev : next))
+      }, [value])
+
+      const syncNext = (next) => {
+        setItems(next)
+        onChange(joinList(next))
+      }
+
+      const setAt = (index, text) => {
+        const next = items.slice()
+        next[index] = text
+        syncNext(next)
+      }
+
+      const removeAt = (index) => {
+        const next = items.filter((_, i) => i !== index)
+        syncNext(next.length ? next : [''])
+      }
+
+      const blank = items.some((item) => !String(item).trim())
+
+      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+        ...items.map((item, index) => h('div', { key: `mv-${index}`, style: { display: 'flex', gap: 6 } },
+          h('input', {
+            style: { ...inputStyle, flex: 1 },
+            value: item,
+            placeholder,
+            onChange: (event) => setAt(index, event.target.value),
+          }),
+          h('button', {
+            type: 'button',
+            style: buttonStyle,
+            title: '删掉这一条',
+            onClick: () => removeAt(index),
+          }, '×'),
+        )),
+        h('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
+          h('button', {
+            type: 'button',
+            style: { ...buttonStyle, alignSelf: 'flex-start' },
+            disabled: blank,
+            title: blank ? '先把空的那行填上' : '再加一条',
+            onClick: () => syncNext([...items, '']),
+          }, '+ 再加一个'),
+          blank
+            ? h('span', { style: { fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' } }, '有空的还没填完')
+            : null,
+        ),
+      )
+    }
     function MaimaiSettings() {
       const [status, setStatus] = useState(null)
       const [form, setForm] = useState({
@@ -171,11 +265,21 @@ window.__ModuleLoader__.load({
       const [biliCred, setBiliCred] = useState(null)
       const [biliLog, setBiliLog] = useState('')
       const [biliDraft, setBiliDraft] = useState('')
+      const [admin, setAdmin] = useState(null)
+      const [pluginOuting, setPluginOuting] = useState(null)
+      const [outingState, setOutingState] = useState(null)
+      const [autoLog, setAutoLog] = useState('')
+      const [pluginRelay, setPluginRelay] = useState(null)
+      const [relayState, setRelayState] = useState(null)
+      const [relayLog, setRelayLog] = useState('')
 
       const applyStatus = useCallback((data) => {
         setStatus(data)
         setTasteState(data.taste || null)
         setBiliCred(data.biliCredential || null)
+        setAdmin(data.admin || null)
+        setOutingState(data.outingState || null)
+        setRelayState(data.relayState || null)
         const resolved = data.resolved || {}
         setForm({
           bridgeDir: resolved.bridgeDir || '',
@@ -186,6 +290,8 @@ window.__ModuleLoader__.load({
         const pc = data.pluginConfig
         setPluginForm(pc && pc.exists ? { ...pc.values } : null)
         setPluginTaste(pc && pc.exists ? { ...(pc.taste || {}) } : null)
+        setPluginOuting(pc && pc.exists ? { ...(pc.outing || {}) } : null)
+        setPluginRelay(pc && pc.exists ? { ...(pc.relay || {}) } : null)
       }, [])
 
       const load = useCallback(async () => {
@@ -354,19 +460,72 @@ window.__ModuleLoader__.load({
         setTasteLog('记账已刷新')
       }), [run])
 
-      const onBiliRelogin = useCallback(() => run('bili-relogin', async () => {
-        setBiliLog('')
-        const res = await fetch(`${API}bili-relogin`, { method: 'POST' })
+      const updateAutoField = (key, type) => (event) => {
+        const raw = type === 'boolean' ? event.target.checked : event.target.value
+        const value = type === 'number' ? (raw === '' ? 0 : Number(raw)) : raw
+        setPluginOuting((prev) => ({ ...(prev || {}), [key]: value }))
+      }
+
+      const onSaveAuto = useCallback(() => run('save-auto', async () => {
+        if (!pluginOuting) throw new Error('没有读到插件配置')
+        const res = await fetch(`${API}plugin-config`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ outing: pluginOuting }),
+        })
+        const data = await res.json()
+        if (!res.ok || !data.ok) throw new Error(data.error || `保存失败：HTTP ${res.status}`)
+        setNotice('「自己想起来」已保存，重启 MaiBot 后生效')
+        await load()
+      }), [pluginOuting, load, run])
+
+      const refreshOuting = useCallback(() => run('outing-refresh', async () => {
+        await load()
+        setAutoLog('记账已刷新')
+      }), [load, run])
+
+      const updateRelayField = (key, type) => (event) => {
+        const raw = type === 'boolean' ? event.target.checked : event.target.value
+        const value = type === 'number' ? (raw === '' ? 0 : Number(raw)) : raw
+        setPluginRelay((prev) => ({ ...(prev || {}), [key]: value }))
+      }
+
+      const onSaveRelay = useCallback(() => run('save-relay', async () => {
+        if (!pluginRelay) throw new Error('没有读到插件配置')
+        const res = await fetch(`${API}plugin-config`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ relay: pluginRelay }),
+        })
+        const data = await res.json()
+        if (!res.ok || !data.ok) throw new Error(data.error || `保存失败：HTTP ${res.status}`)
+        setNotice('「替她说一句」已保存，重启 MaiBot 后生效')
+        await load()
+      }), [pluginRelay, load, run])
+
+      const refreshRelay = useCallback(() => run('relay-refresh', async () => {
+        await load()
+        setRelayLog('记账已刷新')
+      }), [load, run])
+
+      /** 任意平台扫码登录：POST 起进程，然后每 4 秒问一次进度。 */
+      const onCookieLogin = useCallback((siteKey) => run(`login:${siteKey}`, async () => {
+        setLoginLog('')
+        const res = await fetch(`${API}cookie-login`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ site: siteKey }),
+        })
         const data = await res.json()
         if (!res.ok || !data.ok) throw new Error(data.error || `启动失败：HTTP ${res.status}`)
-        setBiliLog('已经弹出浏览器窗口，去里面扫码登录（最多等 4 分钟）')
+        setLoginLog('已经弹出浏览器窗口，去里面登录（最多等 4 分钟），登录成功会自动保存')
         let tries = 0
         const timer = setInterval(async () => {
           tries += 1
           try {
-            const poll = await fetch(`${API}bili-relogin`)
+            const poll = await fetch(`${API}cookie-login`)
             const info = await poll.json()
-            if (info.output) setBiliLog(String(info.output).trim().slice(-600))
+            if (info.output) setLoginLog(String(info.output).trim().slice(-600))
             if (!info.running || tries > 75) {
               clearInterval(timer)
               await load()
@@ -422,6 +581,13 @@ window.__ModuleLoader__.load({
                 : '读取中…'),
           ),
           h('div', { style: kvRow },
+            h('span', null, h('span', { style: statusDot(!!(admin && admin.configured)) }), '管理员 QQ'),
+            h('span', { style: { color: 'var(--dsw-alias-label-primary)' } },
+              admin
+                ? (admin.configured ? admin.display : '还没设（谁申请等谁回）')
+                : '读取中…'),
+          ),
+          h('div', { style: kvRow },
             h('span', null, h('span', { style: statusDot(!!memory) }), '长期记忆库'),
             h('span', { style: { color: 'var(--dsw-alias-label-primary)' } },
               memory ? formatBytes(memory.bytes) : '未检测到 metadata.db'),
@@ -463,15 +629,21 @@ window.__ModuleLoader__.load({
                     }),
                     h('span', { style: { fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' } }, field.hint),
                   )
-                  : h('input', {
-                    style: inputStyle,
-                    type: field.type === 'number' ? 'number' : 'text',
-                    value: pluginForm[field.key] === undefined || pluginForm[field.key] === null
-                      ? ''
-                      : String(pluginForm[field.key]),
-                    placeholder: field.hint,
-                    onChange: updatePluginField(field.key, field.type),
-                  }),
+                  : field.multi
+                    ? h(MultiInput, {
+                      value: pluginForm[field.key],
+                      placeholder: field.hint,
+                      onChange: (text) => setPluginForm((prev) => ({ ...(prev || {}), [field.key]: text })),
+                    })
+                    : h('input', {
+                      style: inputStyle,
+                      type: field.type === 'number' ? 'number' : 'text',
+                      value: pluginForm[field.key] === undefined || pluginForm[field.key] === null
+                        ? ''
+                        : String(pluginForm[field.key]),
+                      placeholder: field.hint,
+                      onChange: updatePluginField(field.key, field.type),
+                    }),
               )),
               h('div', { style: buttonRow },
                 h('button', {
@@ -541,6 +713,125 @@ window.__ModuleLoader__.load({
                 : null,
             )
             : h('p', { style: muted }, '没读到 [taste] 段 —— 先把 MaiBot 目录填对，或重启 MaiBot 让新配置生成。'),
+        ),
+
+        h('div', { style: card },
+          h('div', { style: cardTitle }, '自己想起来'),
+          h('p', { style: muted },
+            '前面那套是「她想去，先问你」；这里是「没人撩她，她也会想起来」。',
+            '开着之后，到时段她会自己冒出来说想出去转转，然后照样走申请流程——批不批还是你说了算。',
+            '关着就得有人先跟她说一句。改完要重启 MaiBot 才生效。'),
+          pluginOuting
+            ? h('div', null,
+              ...AUTO_FIELDS.map((field) => h('div', { key: field.key, style: fieldRow },
+                h('span', { style: labelStyle }, field.label),
+                field.type === 'boolean'
+                  ? h('label', { style: { ...buttonRow, gap: 8 } },
+                    h('input', {
+                      type: 'checkbox',
+                      checked: !!pluginOuting[field.key],
+                      onChange: updateAutoField(field.key, field.type),
+                    }),
+                    h('span', { style: { fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' } }, field.hint),
+                  )
+                  : field.multi
+                    ? h(MultiInput, {
+                      value: pluginOuting[field.key],
+                      placeholder: field.hint,
+                      onChange: (text) => setPluginOuting((prev) => ({ ...(prev || {}), [field.key]: text })),
+                    })
+                    : h('input', {
+                      style: inputStyle,
+                      type: field.type === 'number' ? 'number' : 'text',
+                      value: pluginOuting[field.key] === undefined || pluginOuting[field.key] === null
+                        ? ''
+                        : String(pluginOuting[field.key]),
+                      placeholder: field.hint,
+                      onChange: updateAutoField(field.key, field.type),
+                    }),
+              )),
+              h('div', { style: buttonRow },
+                h('button', {
+                  type: 'button',
+                  style: primaryButtonStyle,
+                  disabled: busy === 'save-auto',
+                  onClick: onSaveAuto,
+                }, busy === 'save-auto' ? '保存中…' : '保存这些设置'),
+                h('button', {
+                  type: 'button',
+                  style: buttonStyle,
+                  disabled: busy === 'outing-refresh',
+                  onClick: refreshOuting,
+                }, busy === 'outing-refresh' ? '刷新中…' : '刷新今天记账'),
+              ),
+              outingState
+                ? h('p', { style: { ...muted, marginTop: 10 } },
+                  `今天（${outingState.date || '—'}）出去 ${outingState.used || 0} 次，叫醒 ${outingState.autoCount || 0} 次`,
+                  outingState.leaseLeftMs > 0
+                    ? `；现在在外面，还剩 ${Math.ceil(outingState.leaseLeftMs / 60000)} 分钟`
+                    : (outingState.waiting ? '；有一条申请正等着回' : '；现在没在外面'))
+                : null,
+              autoLog
+                ? h('p', { style: { margin: '6px 0 0', fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' } }, autoLog)
+                : null,
+            )
+            : h('p', { style: muted }, '没读到 [outing] 段 —— 先把 MaiBot 目录填对，或重启 MaiBot 让新配置生成。'),
+        ),
+
+        h('div', { style: card },
+          h('div', { style: cardTitle }, '替她说一句'),
+          h('p', { style: muted },
+            '她可以把活交给 DSH 去干，但 DSH 没有发送权——它只能在答复里用 [[speak]]…[[/speak]] 写好台词，',
+            '由这里校验后代发。钱和账号的事、@所有人、太长的话都会被拦下。改完要重启 MaiBot 才生效。'),
+          pluginRelay
+            ? h('div', null,
+              ...RELAY_FIELDS.map((field) => h('div', { key: field.key, style: fieldRow },
+                h('span', { style: labelStyle }, field.label),
+                field.type === 'boolean'
+                  ? h('label', { style: { ...buttonRow, gap: 8 } },
+                    h('input', {
+                      type: 'checkbox',
+                      checked: !!pluginRelay[field.key],
+                      onChange: updateRelayField(field.key, field.type),
+                    }),
+                    h('span', { style: { fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' } }, field.hint),
+                  )
+                  : h('input', {
+                    style: inputStyle,
+                    type: field.type === 'number' ? 'number' : 'text',
+                    value: pluginRelay[field.key] === undefined || pluginRelay[field.key] === null
+                      ? ''
+                      : String(pluginRelay[field.key]),
+                    placeholder: field.hint,
+                    onChange: updateRelayField(field.key, field.type),
+                  }),
+              )),
+              h('div', { style: buttonRow },
+                h('button', {
+                  type: 'button',
+                  style: primaryButtonStyle,
+                  disabled: busy === 'save-relay',
+                  onClick: onSaveRelay,
+                }, busy === 'save-relay' ? '保存中…' : '保存这些设置'),
+                h('button', {
+                  type: 'button',
+                  style: buttonStyle,
+                  disabled: busy === 'relay-refresh',
+                  onClick: refreshRelay,
+                }, busy === 'relay-refresh' ? '刷新中…' : '刷新今天记账'),
+              ),
+              relayState
+                ? h('p', { style: { ...muted, marginTop: 10 } },
+                  `今天（${relayState.date || '—'}）替她说了 ${relayState.count || 0} 句`,
+                  relayState.recent && relayState.recent.length
+                    ? `；最近：${relayState.recent.slice(0, 2).join(' / ')}`
+                    : '；今天还没代发过')
+                : null,
+              relayLog
+                ? h('p', { style: { margin: '6px 0 0', fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' } }, relayLog)
+                : null,
+            )
+            : h('p', { style: muted }, '没读到 [relay] 段 —— 先把 MaiBot 目录填对，或重启 MaiBot 让新配置生成。'),
         ),
 
         h('div', { style: card },
@@ -708,9 +999,9 @@ window.__ModuleLoader__.load({
               h('button', {
                 type: 'button',
                 style: primaryButtonStyle,
-                disabled: busy === 'bili-relogin',
-                onClick: onBiliRelogin,
-              }, busy === 'bili-relogin' ? '启动中…' : '扫码登录（会弹浏览器）'),
+                disabled: busy === 'login:bilibili',
+                onClick: () => onCookieLogin('bilibili'),
+              }, busy === 'login:bilibili' ? '等登录…' : '扫码登录（会弹浏览器）'),
               h('button', {
                 type: 'button',
                 style: buttonStyle,
@@ -756,6 +1047,15 @@ window.__ModuleLoader__.load({
                   h('span', {
                     style: { fontSize: 11, color: 'var(--dsw-alias-label-tertiary)', flex: 1 },
                   }, saved ? `已保存 · ${String(saved.cookie || '').length} 字符` : '未设置'),
+                  h('button', {
+                    type: 'button',
+                    style: { ...buttonStyle, padding: '3px 10px', fontSize: 11 },
+                    disabled: busy === `login:${site.key}`,
+                    onClick: (event) => {
+                      event.stopPropagation()
+                      onCookieLogin(site.key)
+                    },
+                  }, busy === `login:${site.key}` ? '等登录…' : '扫码登录'),
                   h('span', { style: { fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' } }, open ? '收起' : '展开'),
                 ),
                 open

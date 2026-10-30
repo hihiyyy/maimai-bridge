@@ -1,6 +1,12 @@
 [plugin]
 config_version = "1.2.0"
 
+# —— 谁说了算 ——
+# 全局管理员 QQ 号，逗号分隔多个（如 "1972078114,123456789"）。
+# 填了之后：批准出门这类「得主人点头」的事只认这些人；
+# 留空就是「谁发起申请就等谁回」，也就是不设防。
+admin_qq = "1972078114"
+
 # —— 总开关 ——
 enabled = true
 
@@ -27,6 +33,24 @@ max_chars = 1200
 wait_after_load_ms = 1200
 cooldown_seconds = 20
 max_per_hour = 12
+# 持久浏览器 profile：和扫码登录共用同一份 cookie。
+# 打开就是她的登录态（B站首页、观看历史、关注列表都是登录后看到的那些）。
+use_profile = true
+# 留空 = 插件目录下的 browser-profile（bili_login.py 也写这里）
+profile_dir = ""
+
+[actions]
+# 动手：允许她在页面上点、填、滚、翻页
+enabled = true
+# 允许的动作，逗号分隔。可选 read / click / type / scroll / press / back
+# 想收紧就删几个（比如只留 read,scroll，她就只能翻着看，不能点开任何东西）
+allowed = "read,click,type,scroll,press,back"
+# 一次最多做几步，防止她一路点下去停不下来
+max_steps = 6
+# 每步之后等多久（毫秒）
+step_wait_ms = 800
+# 单步最长等多久（秒）
+timeout_seconds = 20
 
 [video]
 # 看B站视频：读字幕 + 简介 + 弹幕 + 热评，再交给她用自己的语气聊
@@ -62,3 +86,51 @@ cooldown_seconds = 300
 require_reason = true
 # 试运行：只记账、只嘴上说，不真的发出去
 dry_run = false
+
+[outing]
+# 出门要打招呼：她想自己去远处看看，先问一声；批了才有一段时间，到点回来
+enabled = true
+# 能批准的人（QQ 号，逗号分隔）。留空 = 谁发起申请就等谁回，也就是「问谁等谁」
+owner_ids = ""
+# 申请时没说要多久，默认批多少分钟
+default_minutes = 30
+# 一次最多能批多少分钟（说多了按这个算）
+max_minutes = 120
+# 每天最多能出去几次（0 = 不限）
+daily_limit = 3
+# 主人回哪些词算批准（逗号分隔，含其中一个就算）
+approve_words = "可以,去吧,同意,准了,行,好,批准,ok,OK,嗯,去吧喵"
+# 主人回哪些词算拒绝（先查拒绝再查批准，免得「不行」被当成批准）
+deny_words = "不行,不许,别去,不准,拒绝,不去,no,NO,算了吧"
+# 回来时要不要主动说一句她看到了什么
+report_on_end = true
+# 回来那句话最多多少字
+report_max_chars = 600
+
+# —— 自己想起来（第 3 期）——
+# 开着的话，到点会有人（其实就是她自己）想起来「要不要出去转转」，
+# 然后由她决定要不要跟你申请。关着就等于得有人先撩一句。
+auto_enabled = true
+# 在哪个群叫她。留空 = 用她自己记下的「最近说过话的那个群」
+# （她第一次在群里说话就自动记下来了，不用你填）。
+# 只有想强制指定某个群时才填这里。注意 stream_id 是一串 md5，手填基本不可能。
+auto_stream_id = ""
+# 什么时段可以叫她（逗号分隔，跨夜写成 18:00-09:00）
+auto_windows = "12:00-14:00,18:00-23:00"
+# 每天最多叫醒几次（0 = 不限）
+auto_daily_limit = 2
+# 两次叫醒之间至少隔多少分钟
+auto_cooldown_minutes = 180
+# 叫醒她时说的那句话；留空用默认文案
+auto_intent = ""
+
+[relay]
+# —— 替她说一句 ——
+# DSH 没有发送权，只有「写台词」权：它在答复里写
+#     [[speak]]今天看到个挺好玩的东西喵～[[/speak]]
+# 插件会把这几句校验后代发到群里，正文里则把标记剥掉，免得她照着念出来。
+enabled = true
+# 每天最多替她说几句（0 = 不限）
+daily_limit = 5
+# 一句最多多少字
+max_chars = 200

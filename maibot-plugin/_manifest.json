@@ -1,8 +1,8 @@
 {
   "manifest_version": 2,
-  "version": "1.8.0",
+  "version": "1.0.0",
   "name": "Maibot互联DSH",
-  "description": "把 MaiBot 和 DeepSeek Harness 连起来：人格互通、记忆双向、双向调用；能出去看网页（B站 / Steam / GitHub / 微博 / 豆瓣 / 小黑盒）、真的看 B 站视频，看到喜欢的还会自己点赞收藏。",
+  "description": "把 MaiBot 和 DeepSeek Harness 连起来：人格互通、记忆双向、双向调用；能自己出去看网页、真的看 B 站视频、看到喜欢的会自己点赞收藏；出门前会先申请，回来会汇报。",
   "author": {
     "name": "lirick",
     "url": "https://github.com/hihiyyy"

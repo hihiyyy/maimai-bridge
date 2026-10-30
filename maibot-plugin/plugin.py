@@ -12,14 +12,17 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import random
 import re
 import sys
 import time
+import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from maibot_sdk import API, Command, Field, MaiBotPlugin, PluginConfigBase, Tool
-from maibot_sdk.types import ToolParameterInfo, ToolParamType
+from maibot_sdk import API, Command, EventHandler, Field, MaiBotPlugin, PluginConfigBase, Tool
+from maibot_sdk.types import EventType, ToolParameterInfo, ToolParamType
 
 #: 插件目录。扩展插件跑在独立的 runner 进程里，未必有包上下文，
 #: 所以把目录本身塞进 sys.path，让 `bili_video` 能作为顶层包被导入。
@@ -56,6 +59,12 @@ class BridgeCoreConfig(PluginConfigBase):
     __ui_order__ = 0
 
     config_version: str = Field(default="1.2.0", description="配置版本")
+
+    # —— 谁说了算 ——
+    admin_qq: str = Field(
+        default="",
+        description="全局管理员 QQ 号，逗号分隔多个。填了之后，批准出门这类「得主人点头」的事只认这些人；留空就是谁发起申请等谁回",
+    )
 
     # —— 总开关 ——
     enabled: bool = Field(default=True, description="是否启用桥接功能（关闭后 dsh_task 不可用）")
@@ -99,6 +108,14 @@ class BridgeBrowseConfig(PluginConfigBase):
     wait_after_load_ms: int = Field(default=1200, description="页面加载后再等多久（毫秒），给动态内容一点时间")
     cooldown_seconds: int = Field(default=20, description="两次 look_around 之间至少间隔多少秒（防止她连刷）")
     max_per_hour: int = Field(default=12, description="每小时最多出去看几次（0 表示不限制）")
+    use_profile: bool = Field(
+        default=True,
+        description="是否用持久浏览器 profile（和扫码登录共用同一份 cookie，登录过的站进来就是登录态）",
+    )
+    profile_dir: str = Field(
+        default="",
+        description="持久 profile 目录，留空用插件目录下的 browser-profile",
+    )
 
 
 class BridgeVideoConfig(PluginConfigBase):
@@ -156,13 +173,99 @@ class BridgeTasteConfig(PluginConfigBase):
     )
 
 
+class BridgeActionsConfig(PluginConfigBase):
+    """「动手」的配置：允许她在页面上做哪些动作，做到哪一步为止。"""
+
+    __ui_label__ = "动手"
+    __ui_icon__ = "mouse-pointer-click"
+    __ui_order__ = 15
+
+    enabled: bool = Field(default=True, description="是否允许她在页面上动手（点、填、翻页、滚动）")
+    allowed: str = Field(
+        default="read,click,type,scroll,press,back",
+        description="允许的动作，逗号分隔。可选：read / click / type / scroll / press / back。想收紧就删几个",
+    )
+    max_steps: int = Field(default=6, description="一次请求最多做几步（防止她一路点下去停不下来）")
+    step_wait_ms: int = Field(default=800, description="每步之后等多久（毫秒），给页面一点反应时间")
+    timeout_seconds: int = Field(default=20, description="单步最长等待秒数")
+
+
+class BridgeOutingConfig(PluginConfigBase):
+    """「出门要打招呼」的配置：她想去远处看看，先问一声，批了才去，到点回来。"""
+
+    __ui_label__ = "出门要打招呼"
+    __ui_icon__ = "key-round"
+    __ui_order__ = 35
+
+    enabled: bool = Field(default=True, description="是否启用「先申请再出去」这套流程")
+    owner_ids: str = Field(
+        default="",
+        description="能批准的人（QQ 号，逗号分隔）。留空 = 谁发起申请就等谁回，也就是「问谁等谁」",
+    )
+    default_minutes: int = Field(default=30, description="申请时不说话，默认批多少分钟")
+    max_minutes: int = Field(default=120, description="一次最多能批多少分钟（超过按这个算）")
+    daily_limit: int = Field(default=3, description="每天最多能出去几次（0 表示不限制）")
+    approve_words: str = Field(
+        default="可以,去吧,同意,准了,行,好,批准,ok,OK,嗯,去吧喵",
+        description="主人回哪些词算批准（逗号分隔，含其中一个就算）",
+    )
+    deny_words: str = Field(
+        default="不行,不许,别去,不准,拒绝,不去,no,NO,算了吧",
+        description="主人回哪些词算拒绝（先查拒绝再查批准）",
+    )
+    report_on_end: bool = Field(default=True, description="回来时是否主动汇报一句她看到了什么")
+    report_max_chars: int = Field(default=600, description="回来汇报最多多少字")
+
+    # —— 自己想起来（第 3 期）——
+    auto_enabled: bool = Field(
+        default=False,
+        description="是否让她自己想起来出去：定时叫醒她，由她决定要不要申请。默认关，开了才会动",
+    )
+    auto_stream_id: str = Field(
+        default="",
+        description="在哪个群叫她。留空 = 用她自己记下的「最近说过话的群」（第一次在群里说话就自动记下来，不用填）",
+    )
+    auto_windows: str = Field(
+        default="12:00-14:00,18:00-23:00",
+        description="什么时段可以叫她（逗号分隔，跨夜写成 18:00-09:00 也行）",
+    )
+    auto_daily_limit: int = Field(default=2, description="每天最多叫醒几次（0 表示不限制）")
+    auto_cooldown_minutes: int = Field(
+        default=180, description="两次叫醒之间至少隔多少分钟"
+    )
+    auto_intent: str = Field(
+        default="", description="叫醒她时说的那句话，留空用默认文案"
+    )
+
+
+class BridgeRelayConfig(PluginConfigBase):
+    """「替她说一句」：DSH 没有发送权，只有写台词权。
+
+    DSH 在答复里写 ``[[speak]]台词[[/speak]]``，这里负责把关——
+    多长、说不说、发不发，都在这儿定；它自己没法直接往群里发东西。
+    """
+
+    __ui_label__ = "替她说一句"
+    __ui_icon__ = "send"
+    __ui_order__ = 40
+
+    enabled: bool = Field(
+        default=True, description="允许 DSH 用 [[speak]]…[[/speak]] 借她的嘴说话"
+    )
+    daily_limit: int = Field(default=5, description="每天最多替她说几句（0 = 不限制）")
+    max_chars: int = Field(default=200, description="一句最多多少字")
+
+
 class MaiMaiBridgeConfig(PluginConfigBase):
     """桥插件配置。"""
 
     plugin: BridgeCoreConfig = Field(default_factory=BridgeCoreConfig)
     browse: BridgeBrowseConfig = Field(default_factory=BridgeBrowseConfig)
+    actions: BridgeActionsConfig = Field(default_factory=BridgeActionsConfig)
+    outing: BridgeOutingConfig = Field(default_factory=BridgeOutingConfig)
     video: BridgeVideoConfig = Field(default_factory=BridgeVideoConfig)
     taste: BridgeTasteConfig = Field(default_factory=BridgeTasteConfig)
+    relay: BridgeRelayConfig = Field(default_factory=BridgeRelayConfig)
 
 
 # 站点简写 → 搜索页模板。{q} 会被替换成 URL 编码后的关键词。
@@ -612,6 +715,240 @@ def _resolve_url(site: str, what: str, url: str) -> Tuple[str, str]:
     return "https://www.bing.com/", "随便看看"
 
 
+DEFAULT_ACTION_ORDER = ("read", "click", "type", "scroll", "press", "back")
+
+# 这几件事和钱、账号有关，写死不给改：她可以看，但不能替主人做决定。
+_ACTION_REDLINES = (
+    "付款",
+    "支付",
+    "购买",
+    "下单",
+    "结算",
+    "充值",
+    "退款",
+    "转账",
+    "钱包",
+    "绑定银行卡",
+    "实名认证",
+    "改密码",
+    "修改密码",
+    "注销账号",
+    "注销账户",
+    "解除绑定",
+    "解绑手机",
+    "删除账号",
+)
+
+# 往外面说话（评论 / 弹幕 / 私信 / 投稿）属于第 4 期「代发」，现在一律拦下。
+_ACTION_SOCIAL = (
+    "发送评论",
+    "发表评论",
+    "发评论",
+    "发弹幕",
+    "发送弹幕",
+    "发私信",
+    "发送私信",
+    "发布视频",
+    "发布动态",
+    "投稿",
+    "转发",
+)
+
+
+DEFAULT_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0"
+)
+
+
+def _parse_steps(raw: str, limit: int) -> Tuple[list, str]:
+    """把 steps 的 JSON 字符串解析成步骤列表。解析失败返回 (空, 原因)。"""
+
+    text = (raw or "").strip()
+    if not text:
+        return [], ""
+    try:
+        data = json.loads(text)
+    except Exception as exc:  # noqa: BLE001
+        return [], f"steps 不是合法 JSON：{type(exc).__name__}: {str(exc)[:120]}"
+    if isinstance(data, dict):
+        data = [data]
+    if not isinstance(data, list):
+        return [], 'steps 要是一个数组，比如 [{"op":"scroll","px":1200}]'
+    steps = [item for item in data if isinstance(item, dict)]
+    if len(steps) > limit:
+        return [], f"一次最多 {limit} 步，你给了 {len(steps)} 步，拆成两次来吧"
+    return steps, ""
+
+
+def _check_actions(steps: list, allowed: set) -> Tuple[list, str]:
+    """按白名单和红线校验动作。返回 (通过的步骤, 拒绝原因)。"""
+
+    for idx, step in enumerate(steps, 1):
+        op = str(step.get("op") or "").strip().lower()
+        if not op:
+            return [], f"第 {idx} 步没写 op"
+        if op not in allowed:
+            names = "、".join(sorted(allowed))
+            return [], f"第 {idx} 步是「{op}」，不在允许的动作里（现在允许：{names}）"
+        haystack = " ".join(str(step.get(key) or "") for key in ("text", "value", "selector"))
+        for bad in _ACTION_REDLINES:
+            if bad in haystack:
+                return [], f"第 {idx} 步碰到「{bad}」——钱和账号的事我不替主人做"
+        for bad in _ACTION_SOCIAL:
+            if bad in haystack:
+                return [], f"第 {idx} 步要「{bad}」——往外说话得先过主人，这个还没开"
+    return steps, ""
+
+
+def _run_step(page: Any, op: str, step: Dict[str, Any], timeout_ms: int) -> str:
+    """执行一步。返回一句人话，写进动作日志。"""
+
+    if op == "read":
+        return "记下当前页"
+
+    if op == "scroll":
+        where = str(step.get("to") or "").strip().lower()
+        if where in ("bottom", "end", "底", "到底"):
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            return "滚到底"
+        if where in ("top", "顶", "顶部"):
+            page.evaluate("window.scrollTo(0, 0)")
+            return "滚回顶部"
+        px = int(step.get("px") or 900)
+        page.mouse.wheel(0, px)
+        return f"往下滚了 {px}px"
+
+    if op == "click":
+        selector = str(step.get("selector") or "").strip()
+        text = str(step.get("text") or "").strip()
+        if selector:
+            page.click(selector, timeout=timeout_ms)
+            return f"点了 {selector}"
+        if text:
+            page.get_by_text(text, exact=False).first.click(timeout=timeout_ms)
+            return f"点了「{text}」"
+        raise ValueError("click 要给 selector 或者 text")
+
+    if op == "type":
+        selector = str(step.get("selector") or "").strip()
+        value = str(step.get("value") or "")
+        if not selector:
+            raise ValueError("type 要给 selector")
+        page.fill(selector, value, timeout=timeout_ms)
+        if step.get("enter"):
+            page.keyboard.press("Enter")
+            return f"在 {selector} 填了「{value[:20]}」并回车"
+        return f"在 {selector} 填了「{value[:20]}」"
+
+    if op == "press":
+        key = str(step.get("key") or "Enter")
+        page.keyboard.press(key)
+        return f"按了 {key}"
+
+    if op == "back":
+        page.go_back()
+        return "后退一步"
+
+    raise ValueError(f"不认识的动作 {op}")
+
+
+def _act_sync(
+    url: str,
+    steps: list,
+    what: str,
+    max_chars: int,
+    timeout_seconds: int,
+    step_wait_ms: int,
+    channel: str,
+    headless: bool,
+    profile_dir: str,
+) -> Dict[str, Any]:
+    """打开页面、按顺序做动作、把最后看到的东西读回来（同步，跑在线程里）。"""
+
+    from playwright.sync_api import sync_playwright
+
+    launch_kwargs: Dict[str, Any] = {"headless": headless}
+    if channel.strip():
+        launch_kwargs["channel"] = channel.strip()
+
+    log: list = []
+    title = ""
+    body = ""
+    final_url = url
+    with sync_playwright() as playwright:
+        context = _open_browser_context(playwright, launch_kwargs, profile_dir)
+        try:
+            pages = getattr(context, "pages", None)
+            page = pages[0] if pages else context.new_page()
+            page.goto(url, timeout=timeout_seconds * 1000, wait_until="domcontentloaded")
+            page.wait_for_timeout(max(0, step_wait_ms))
+            for idx, step in enumerate(steps, 1):
+                op = str(step.get("op") or "").strip().lower()
+                try:
+                    log.append(f"{idx}. {_run_step(page, op, step, timeout_seconds * 1000)}")
+                except Exception as exc:  # noqa: BLE001
+                    log.append(f"{idx}. {op} 没做成：{type(exc).__name__}: {str(exc)[:120]}")
+                    break
+                page.wait_for_timeout(max(0, step_wait_ms))
+            title = page.title()
+            final_url = page.url
+            body = page.inner_text("body")
+        finally:
+            _close_context(context)
+
+    blocked = ""
+    probe = f"{title} {body[:600]}"
+    for marker in _BLOCK_MARKERS:
+        if marker in probe:
+            blocked = marker
+            break
+
+    return {
+        "url": final_url,
+        "title": title,
+        "excerpt": _pick_excerpt(body, what, max_chars),
+        "total_chars": len(body),
+        "log": log,
+        "blocked": blocked,
+    }
+
+
+def _open_browser_context(playwright: Any, launch_kwargs: Dict[str, Any], profile_dir: str) -> Any:
+    """开浏览器上下文；给了 profile_dir 就用持久 profile。
+
+    持久 profile 的好处：cookie / localStorage 留得住，扫码登录一次之后，
+    「出去看看」进来就是登录态。代价是同一个 profile 同时只能被一个进程占用，
+    所以调用方必须保证串行（插件里靠 _browse_lock）。
+    """
+
+    common: Dict[str, Any] = {
+        "locale": "zh-CN",
+        "viewport": {"width": 1366, "height": 900},
+        "user_agent": DEFAULT_UA,
+    }
+    if profile_dir:
+        Path(profile_dir).mkdir(parents=True, exist_ok=True)
+        return playwright.chromium.launch_persistent_context(
+            profile_dir, **launch_kwargs, **common
+        )
+    browser = playwright.chromium.launch(**launch_kwargs)
+    return browser.new_context(**common)
+
+
+def _close_context(context: Any) -> None:
+    """关上下文。持久 profile 和普通 context 的关法不一样。"""
+
+    try:
+        browser = getattr(context, "browser", None)
+        if browser is not None:
+            browser.close()
+        else:
+            context.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _browse_sync(
     url: str,
     what: str,
@@ -622,11 +959,14 @@ def _browse_sync(
     wait_after_load_ms: int,
     recipe: Dict[str, Any] | None = None,
     cookies: list | None = None,
+    profile_dir: str = "",
 ) -> Dict[str, Any]:
     """真正去打开网页并抓正文（同步，跑在线程里）。
 
     给了配方就优先抽结构化条目；抽不到再把整页正文作为兜底。
     cookies 是这个平台已保存的登录态，注入后能看到登录后才有的内容。
+    profile_dir 非空就走**持久 profile**：和扫码登录共用同一份 cookie，
+    打开就是她自己的登录态，不用每次重新注入。
     """
 
     from playwright.sync_api import sync_playwright
@@ -637,23 +977,19 @@ def _browse_sync(
 
     items: list = []
     matched = 0
+    title = ""
+    body = ""
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(**launch_kwargs)
+        context = _open_browser_context(playwright, launch_kwargs, profile_dir)
         try:
-            context = browser.new_context(
-                locale="zh-CN",
-                viewport={"width": 1366, "height": 900},
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0"
-                ),
-            )
-            if cookies:
+            # 持久 profile 本身就带着登录态，再塞 cookies 反而会污染它
+            if cookies and not profile_dir:
                 try:
                     context.add_cookies(cookies)
                 except Exception:  # noqa: BLE001
                     pass
-            page = context.new_page()
+            pages = getattr(context, "pages", None)
+            page = pages[0] if pages else context.new_page()
             page.goto(url, timeout=timeout_seconds * 1000, wait_until="domcontentloaded")
             page.wait_for_timeout(max(0, wait_after_load_ms))
             title = page.title()
@@ -674,7 +1010,7 @@ def _browse_sync(
                     items = _extract_items(page, recipe)
             body = page.inner_text("body")
         finally:
-            browser.close()
+            _close_context(context)
 
     blocked = ""
     probe = f"{title} {body[:600]}"
@@ -708,6 +1044,8 @@ class MaiMaiBridgePlugin(MaiBotPlugin):
         self._bili_lock = asyncio.Lock()
         self._bili: Optional[Any] = None
         self._bili_cred_path: Optional[Path] = None
+        self._auto_task: Optional[asyncio.Task] = None
+        self._last_stream = ""
 
     async def on_load(self) -> None:
         """插件加载。"""
@@ -716,9 +1054,17 @@ class MaiMaiBridgePlugin(MaiBotPlugin):
             self.ctx.logger.warning(
                 "[maimai_bridge] 看视频模块导入失败，相关功能已关闭：%s", _VIDEO_IMPORT_ERROR
             )
+        self._auto_task = asyncio.create_task(self._auto_loop())
 
     async def on_unload(self) -> None:
         """插件卸载。"""
+        if self._auto_task is not None:
+            self._auto_task.cancel()
+            try:
+                await self._auto_task
+            except Exception:  # noqa: BLE001
+                pass
+            self._auto_task = None
         if self._bili is not None:
             try:
                 await self._bili.close()
@@ -740,6 +1086,29 @@ class MaiMaiBridgePlugin(MaiBotPlugin):
         del config_data
 
     # ===== 看视频（B站） =====
+
+    def _admin_ids(self) -> list:
+        """全局管理员名单（逗号分隔，中英文逗号都认）。"""
+
+        raw = str(self.config.plugin.admin_qq or "").replace("，", ",")
+        return [x.strip() for x in raw.split(",") if x.strip()]
+
+    def _is_admin(self, user_id: str) -> bool:
+        """这个人是不是管理员。名单空着就返回 False（等于「还没设防」）。"""
+
+        ids = self._admin_ids()
+        if not ids:
+            return False
+        return str(user_id or "") in ids
+
+    def _profile_dir(self) -> str:
+        """持久浏览器 profile 目录。关掉或留空时返回空串（每次开全新的匿名上下文）。"""
+
+        browse = self.config.browse
+        if not getattr(browse, "use_profile", True):
+            return ""
+        raw = str(getattr(browse, "profile_dir", "") or "").strip()
+        return raw or str(Path(_plugin_dir()) / "browser-profile")
 
     def _video_data_dir(self) -> Path:
         """插件自己的数据目录：凭证文件放这儿。"""
@@ -1141,6 +1510,89 @@ class MaiMaiBridgePlugin(MaiBotPlugin):
         )
         return {"name": "maimai_speak", "content": json.dumps(result, ensure_ascii=False)}
 
+    # ===== 替她说一句（第 4 期）=====
+
+    def _relay_path(self) -> Path:
+        return self._video_data_dir() / "plugins" / "maimai_bridge" / "relay.json"
+
+    def _load_relay(self) -> Dict[str, Any]:
+        today = time.strftime("%Y-%m-%d")
+        try:
+            data = json.loads(self._relay_path().read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            data = {}
+        if not isinstance(data, dict) or data.get("date") != today:
+            return {"date": today, "count": 0, "sent": []}
+        data.setdefault("count", 0)
+        data.setdefault("sent", [])
+        return data
+
+    def _save_relay(self, data: Dict[str, Any]) -> None:
+        try:
+            path = self._relay_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.ctx.logger.warning(f"[maimai_bridge] 写 relay.json 失败：{exc}")
+
+    def _relay_check(self, line: str, data: Dict[str, Any]) -> str:
+        """检查一句台词能不能替她说。返回拒绝原因，空串表示可以。"""
+
+        cfg = self.config.relay
+        text = (line or "").strip()
+        if not text:
+            return "空的"
+        if len(text) > int(cfg.max_chars or 200):
+            return f"{len(text)} 字，超过 {cfg.max_chars} 字上限"
+        for word in _RELAY_REDLINES:
+            if word in text:
+                return f"碰到「{word}」——钱和账号的事我不替她说"
+        low = text.lower()
+        for word in _RELAY_MENTIONS:
+            if word.lower() in low:
+                return "不能 @ 所有人"
+        limit = int(cfg.daily_limit or 0)
+        if limit > 0 and int(data.get("count") or 0) >= limit:
+            return f"今天已经替她说了 {int(data.get('count') or 0)} 句，够了"
+        return ""
+
+    async def _relay_deliver(self, lines: list, stream_id: str) -> str:
+        """把 DSH 写好的台词发出去，返回一句要附在答复后面的说明。"""
+
+        cfg = self.config.relay
+        if not cfg.enabled or not lines:
+            return ""
+        if not stream_id:
+            return "（DSH 想借你的嘴说一句，但我不知道发哪个会话，就没发）"
+
+        data = self._load_relay()
+        sent: list = []
+        skipped: list = []
+        for line in lines:
+            reason = self._relay_check(line, data)
+            if reason:
+                skipped.append(reason)
+                continue
+            try:
+                await self.ctx.send.text(line, stream_id)
+            except Exception as exc:  # noqa: BLE001
+                skipped.append(f"发送失败：{type(exc).__name__}")
+                continue
+            sent.append(line)
+            data["count"] = int(data.get("count") or 0) + 1
+            data.setdefault("sent", []).append({"at": time.time(), "text": line[:80]})
+        if sent:
+            self._save_relay(data)
+
+        parts: list = []
+        if sent:
+            parts.append(f"（DSH 借你的嘴说了 {len(sent)} 句，已经发到群里了）")
+        if skipped:
+            parts.append("（有 %d 句没发：%s）" % (len(skipped), "；".join(skipped[:3])))
+        return "\n\n".join(parts)
+
     @Tool(
         "dsh_task",
         description="把一件需要动手的活交给 DeepSeek Harness 去执行（它能操作电脑、查资料、写文件）。",
@@ -1149,9 +1601,14 @@ class MaiMaiBridgePlugin(MaiBotPlugin):
         ],
     )
     async def tool_dsh_task(self, task: str = "", **kwargs: Any) -> Dict[str, Any]:
-        """以一次性进程调用 DSH headless，返回它的最终答复。"""
+        """以一次性进程调用 DSH headless，返回它的最终答复。
 
-        del kwargs
+        DSH 想借麦麦的嘴说话时，在答复里写 ``[[speak]]台词[[/speak]]``；
+        那几句交给 ``_relay_deliver`` 校验后代发，正文里的标记会被剥掉，
+        免得麦麦照着念出来。
+        """
+
+        stream_id = str(kwargs.get("stream_id") or "")
         if not task:
             return {"name": "dsh_task", "content": "任务描述不能为空"}
 
@@ -1161,6 +1618,7 @@ class MaiMaiBridgePlugin(MaiBotPlugin):
 
         extra_args = [arg for arg in str(core.dsh_extra_args or "").split(" ") if arg.strip()]
         cwd = str(core.dsh_cwd or "").strip() or None
+        prompt = task if not self.config.relay.enabled else f"{task}\n\n{_RELAY_HINT}"
 
         try:
             process = await asyncio.create_subprocess_exec(
@@ -1168,7 +1626,7 @@ class MaiMaiBridgePlugin(MaiBotPlugin):
                 *extra_args,
                 "--profile",
                 core.dsh_profile,
-                task,
+                prompt,
                 cwd=cwd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -1191,8 +1649,16 @@ class MaiMaiBridgePlugin(MaiBotPlugin):
 
         answer = stdout.decode("utf-8", errors="replace").strip()
         diagnostics = stderr.decode("utf-8", errors="replace").strip()
+
+        speak_lines, cleaned = _extract_speak(answer)
+        relay_note = await self._relay_deliver(speak_lines, stream_id)
+        if speak_lines:
+            answer = cleaned or "（DSH 只留了几句要发的话，没别的正文）"
+
         if not answer:
             answer = f"DSH 没有给出答复（退出码 {process.returncode}）。诊断：{diagnostics[-800:]}"
+        if relay_note:
+            answer = f"{answer}\n\n{relay_note}"
         return {"name": "dsh_task", "content": answer}
 
     # ===== 看视频（B站） =====
@@ -1336,6 +1802,7 @@ class MaiMaiBridgePlugin(MaiBotPlugin):
                     int(browse.wait_after_load_ms or 0),
                     recipe,
                     cookies,
+                    self._profile_dir(),
                 )
             except Exception as exc:  # noqa: BLE001
                 return {
@@ -1370,6 +1837,94 @@ class MaiMaiBridgePlugin(MaiBotPlugin):
                     "如果正文里也没有相关东西，就直说没看到，绝对不要自己编内容。"
                 )
         return {"name": "look_around", "content": json.dumps(payload, ensure_ascii=False)}
+
+    @Tool(
+        "page_act",
+        description=(
+            "在网页上真正动手：打开一个页面，按顺序点 / 填 / 滚 / 翻页，然后把看到的东西读回来。"
+            "用来翻到第二页、点开一个条目、展开更多。一次最多几步；"
+            "碰到钱和账号的事（付款、下单、注销、改密码）直接拒绝；"
+            "往外面说话（评论、弹幕、私信、投稿）也拒绝——那些得先过主人。"
+        ),
+        parameters=[
+            ToolParameterInfo(
+                name="url",
+                param_type=ToolParamType.STRING,
+                description="要打开的网址（完整 http/https）",
+                required=True,
+            ),
+            ToolParameterInfo(
+                name="steps",
+                param_type=ToolParamType.STRING,
+                description=(
+                    '要做的事，JSON 数组。例：[{"op":"click","text":"下一页"},{"op":"scroll","to":"bottom"}]。'
+                    "可用 op：click / type / scroll / press / back / read"
+                ),
+                required=False,
+            ),
+            ToolParameterInfo(
+                name="what",
+                param_type=ToolParamType.STRING,
+                description="你在找什么（决定正文从哪里截）",
+                required=False,
+            ),
+        ],
+    )
+    async def tool_page_act(self, url: str = "", steps: str = "", what: str = "", **kwargs: Any) -> Dict[str, Any]:
+        """在页面上动手（点、填、滚、翻页），然后把结果读回来。"""
+
+        acts = self.config.actions
+        if not acts.enabled:
+            return {"name": "page_act", "content": "动手功能关掉了，只能看不能点。"}
+
+        target = (url or "").strip()
+        if not target.startswith(("http://", "https://")):
+            return {"name": "page_act", "content": "要一个完整的 http/https 网址。"}
+
+        allowed = {item.strip().lower() for item in str(acts.allowed or "").split(",") if item.strip()}
+        if not allowed:
+            return {"name": "page_act", "content": "配置里没允许任何动作。"}
+
+        limit = max(1, int(acts.max_steps or 6))
+        parsed, why = _parse_steps(steps, limit)
+        if why:
+            return {"name": "page_act", "content": why}
+        clean, why = _check_actions(parsed, allowed)
+        if why:
+            return {"name": "page_act", "content": why}
+
+        browse = self.config.browse
+        try:
+            result = await asyncio.to_thread(
+                _act_sync,
+                target,
+                clean,
+                (what or "").strip(),
+                max(200, int(browse.max_chars or 1200)),
+                max(5, int(acts.timeout_seconds or 20)),
+                int(acts.step_wait_ms or 800),
+                str(browse.browser_channel or ""),
+                bool(browse.headless),
+                self._profile_dir(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {"name": "page_act", "content": f"没能打开「{target}」：{type(exc).__name__}: {str(exc)[:200]}"}
+
+        if result["blocked"]:
+            return {
+                "name": "page_act",
+                "content": f"弹出了验证（{result['blocked']}），这次没做成……别硬试，也别猜内容。",
+            }
+
+        payload = {
+            "最后地址": result["url"],
+            "标题": result["title"],
+            "做过的动作": result["log"] or ["（没给动作，只是打开看了一下）"],
+            "看到的内容": result["excerpt"],
+            "整页字数": result["total_chars"],
+            "说明": "动作日志是真的执行结果，看到的内容是页面正文。别编。",
+        }
+        return {"name": "page_act", "content": json.dumps(payload, ensure_ascii=False)}
 
     # —— 斜杠命令：人手一条，绕过麦麦的自主判断 ——
 
@@ -1432,6 +1987,7 @@ class MaiMaiBridgePlugin(MaiBotPlugin):
                     int(browse.wait_after_load_ms or 0),
                     recipe,
                     cookies,
+                    self._profile_dir(),
                 )
             except Exception as exc:  # noqa: BLE001
                 return await self._say(
@@ -1574,6 +2130,581 @@ class MaiMaiBridgePlugin(MaiBotPlugin):
         except Exception as exc:  # noqa: BLE001
             return False, f"发送失败：{type(exc).__name__}: {str(exc)[:200]}", False
         return True, log, True
+
+    # ── 出门要打招呼（第 2 期：通行证）────────────────────────
+
+    def _outing_path(self) -> Path:
+        """出门记录存在哪。"""
+
+        return self._video_data_dir() / "plugins" / "maimai_bridge" / "outing.json"
+
+    def _load_outing(self) -> Dict[str, Any]:
+        """读出门记录。跨天清零，超时的申请当没问过。"""
+
+        today = time.strftime("%Y-%m-%d")
+        empty: Dict[str, Any] = {"date": today, "used": 0, "pending": None, "lease": None}
+        try:
+            data = json.loads(self._outing_path().read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            return empty
+        if not isinstance(data, dict) or data.get("date") != today:
+            return empty
+        pending = data.get("pending")
+        if isinstance(pending, dict):
+            if time.time() - float(pending.get("created_at") or 0) > 900:
+                data["pending"] = None
+        else:
+            data["pending"] = None
+        if not isinstance(data.get("lease"), dict):
+            data["lease"] = None
+        try:
+            data["used"] = int(data.get("used") or 0)
+        except Exception:  # noqa: BLE001
+            data["used"] = 0
+        return data
+
+    def _save_outing(self, data: Dict[str, Any]) -> None:
+        """写回出门记录。"""
+
+        try:
+            path = self._outing_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as exc:  # noqa: BLE001
+            self.ctx.logger.warning("[maimai_bridge] 出门记录写不进去：%s", exc)
+
+    def _active_lease(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """还没到点的出门记录。"""
+
+        lease = data.get("lease")
+        if not isinstance(lease, dict):
+            return None
+        if float(lease.get("until") or 0) <= time.time():
+            return None
+        return lease
+
+    def _expired_lease(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """到点了、但还没汇报过的出门记录。"""
+
+        lease = data.get("lease")
+        if not isinstance(lease, dict) or lease.get("reported"):
+            return None
+        if float(lease.get("until") or 0) > time.time():
+            return None
+        return lease
+
+    async def _report_back(self, lease: Dict[str, Any], extra: str = "") -> None:
+        """出门结束时说一句。"""
+
+        cfg = self.config.outing
+        minutes = int(lease.get("minutes") or 0)
+        head = f"我回来啦，出去了 {minutes} 分钟。" if minutes else "我回来啦。"
+        body = (extra or "").strip()[: int(cfg.report_max_chars or 600)]
+        if not body:
+            reason = str(lease.get("reason") or "").strip()
+            body = f"说是{reason[:40]}，看完就回来了。" if reason else ""
+        text = head + (("\n" + body) if body else "")
+        await self._notify(str(lease.get("stream_id") or ""), text)
+
+    # ===== 自己想起来（第 3 期）=====
+
+    def _auto_state(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """自动叫醒的今日记账。跨天清零。"""
+
+        today = time.strftime("%Y-%m-%d")
+        auto = data.get("auto")
+        if not isinstance(auto, dict) or auto.get("date") != today:
+            auto = {"date": today, "count": 0, "last_at": 0.0}
+            data["auto"] = auto
+        return auto
+
+    @staticmethod
+    def _in_windows(spec: str, now: Optional[float] = None) -> bool:
+        """现在是不是在允许的时段里。支持跨夜（如 18:00-09:00）。"""
+
+        stamp = time.localtime(now if now is not None else time.time())
+        minutes = stamp.tm_hour * 60 + stamp.tm_min
+        for chunk in str(spec or "").replace("，", ",").split(","):
+            piece = chunk.strip()
+            if "-" not in piece:
+                continue
+            left, _, right = piece.partition("-")
+            try:
+                sh, sm = (int(x) for x in left.strip().split(":"))
+                eh, em = (int(x) for x in right.strip().split(":"))
+            except Exception:  # noqa: BLE001
+                continue
+            start = sh * 60 + sm
+            end = eh * 60 + em
+            if start == end:
+                return True
+            if start < end:
+                if start <= minutes < end:
+                    return True
+            elif minutes >= start or minutes < end:
+                return True
+        return False
+
+    def _auto_block_reason(self, data: Dict[str, Any]) -> str:
+        """现在能不能叫她。返回空串表示能叫。"""
+
+        cfg = self.config.outing
+        if not cfg.auto_enabled:
+            return "自动叫醒关着"
+        if not (str(cfg.auto_stream_id or "").strip() or data.get("auto_stream")):
+            return "还没在任何一个群里说过话，不知道该去哪儿叫她"
+        if not self._in_windows(cfg.auto_windows):
+            return "不在允许的时段"
+        if data.get("pending"):
+            return "已经有一条申请还等着回"
+        if self._active_lease(data):
+            return "她这会儿正在外面"
+        auto = self._auto_state(data)
+        limit = int(cfg.auto_daily_limit or 0)
+        if limit > 0 and int(auto.get("count") or 0) >= limit:
+            return f"今天已经叫过 {auto.get('count')} 次了"
+        gap = float(cfg.auto_cooldown_minutes or 0) * 60
+        if gap > 0 and time.time() - float(auto.get("last_at") or 0) < gap:
+            return "离上次叫醒还不够久"
+        return ""
+
+    def _auto_intent(self) -> str:
+        """叫醒她时说的那句话。留空用默认文案。"""
+
+        custom = str(self.config.outing.auto_intent or "").strip()
+        if custom:
+            return custom
+        return (
+            "（到点了，这会儿没人叫你。你自己想想现在想不想出去转转——"
+            "想看什么平台、什么关键词都随你的兴趣。"
+            "想的话就用 ask_permission 跟主人提一句申请，说清楚想去哪儿、想看什么、大概多久；"
+            "不想、没兴趣、或者刚看过没意思，就什么都不用做。）"
+        )
+
+    def _remember_stream(self, stream_id: str, kwargs: Dict[str, Any]) -> None:
+        """记住最近说过话的群，自动叫醒时往那儿叫。
+
+        stream_id 是 MaiBot 算出来的 md5（`platform_组id` 的哈希），人手填不出来，
+        所以让她自己记：只要在群里说过一句话，就把那个流记下来。
+        """
+
+        stream = str(stream_id or "").strip()
+        if not stream:
+            return
+        if not str(kwargs.get("group_id") or "").strip():
+            return  # 私聊不记，只在群里叫
+        if stream == self._last_stream:
+            return
+        data = self._load_outing()
+        if data.get("auto_stream") == stream:
+            self._last_stream = stream
+            return
+        data["auto_stream"] = stream
+        self._last_stream = stream
+        self._save_outing(data)
+
+    def _auto_stream(self, data: Dict[str, Any]) -> str:
+        """该往哪个流里叫她：手填的优先（可填多个，轮流挑），否则用她记下的那个群。"""
+
+        raw = str(self.config.outing.auto_stream_id or "").replace("，", ",")
+        choices = [item.strip() for item in raw.split(",") if item.strip()]
+        if choices:
+            return random.choice(choices) if len(choices) > 1 else choices[0]
+        return str(data.get("auto_stream") or "").strip()
+
+    async def _auto_tick(self) -> None:
+        """巡查一次：该不该叫她。"""
+
+        data = self._load_outing()
+        expired = self._expired_lease(data)
+        if expired:
+            await self._report_back(expired)
+            data["lease"] = None
+            self._save_outing(data)
+            return
+        reason = self._auto_block_reason(data)
+        if reason:
+            self.ctx.logger.debug("[maimai_bridge] 这会儿不叫她：%s", reason)
+            return
+        cfg = self.config.outing
+        stream_id = self._auto_stream(data)
+        auto = self._auto_state(data)
+        try:
+            await self.ctx.maisaka.proactive.trigger(
+                stream_id,
+                self._auto_intent(),
+                reason="maimai_bridge 定时叫醒",
+                metadata={"source": "maimai_bridge", "kind": "outing_auto"},
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.ctx.logger.warning("[maimai_bridge] 叫醒失败：%s", exc)
+            return
+        auto["count"] = int(auto.get("count") or 0) + 1
+        auto["last_at"] = time.time()
+        data["auto"] = auto
+        self._save_outing(data)
+        self.ctx.logger.info(
+            "[maimai_bridge] 叫醒了一次（今天第 %s 次）", auto["count"]
+        )
+
+    async def _auto_loop(self) -> None:
+        """每分钟巡查一次。"""
+
+        while True:
+            try:
+                await self._auto_tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                self.ctx.logger.warning("[maimai_bridge] 巡查出错：%s", exc)
+            await asyncio.sleep(60)
+
+    async def _check_outing_reply(
+        self, message: Any, stream_id: str, kwargs: Dict[str, Any]
+    ) -> Optional[str]:
+        """看这条消息是不是在回复出门申请；顺手处理「到点了该汇报」。"""
+
+        cfg = self.config.outing
+        if not cfg.enabled:
+            return None
+        data = self._load_outing()
+
+        expired = self._expired_lease(data)
+        if expired is not None:
+            expired["reported"] = True
+            self._save_outing(data)
+            if cfg.report_on_end:
+                await self._report_back(expired)
+            return "出门到点了，已经汇报"
+
+        pending = data.get("pending")
+        if not isinstance(pending, dict):
+            return None
+
+        text = ""
+        if isinstance(message, dict):
+            text = str(message.get("plain_text") or message.get("raw_message") or "")
+        text = text.strip()
+        if not text:
+            return None
+
+        want_stream = str(pending.get("stream_id") or "")
+        if want_stream and want_stream != str(stream_id or ""):
+            return None
+
+        sender = str(kwargs.get("user_id") or "")
+        if not sender and isinstance(message, dict):
+            sender = str(message.get("user_id") or "")
+            if not sender:
+                node = message.get("sender")
+                if isinstance(node, dict):
+                    sender = str(node.get("user_id") or "")
+
+        owners = [
+            x.strip()
+            for x in str(cfg.owner_ids or "").replace("，", ",").split(",")
+            if x.strip()
+        ]
+        if not owners:
+            owners = self._admin_ids()  # 没单独配就用全局管理员
+        if owners:
+            if sender not in owners:
+                return None
+        elif sender and str(pending.get("user_id") or "") and sender != str(pending.get("user_id")):
+            return None
+
+        if _contains_any(text, cfg.deny_words):
+            data["pending"] = None
+            self._save_outing(data)
+            await self._notify(stream_id, "好吧，那我不去了～")
+            return "拒绝了出门申请"
+
+        if _contains_any(text, cfg.approve_words):
+            minutes = int(pending.get("minutes") or cfg.default_minutes or 30)
+            now = time.time()
+            data["pending"] = None
+            data["used"] = int(data.get("used") or 0) + 1
+            data["lease"] = {
+                "id": str(pending.get("id") or ""),
+                "reason": str(pending.get("reason") or ""),
+                "sites": str(pending.get("sites") or ""),
+                "minutes": minutes,
+                "started_at": now,
+                "until": now + minutes * 60,
+                "stream_id": str(stream_id or ""),
+                "reported": False,
+            }
+            self._save_outing(data)
+            await self._notify(
+                stream_id, f"谢谢主人，我出去转 {minutes} 分钟，回来跟你说看了什么～"
+            )
+            return "批准了出门申请"
+
+        return None
+
+    @EventHandler(
+        "outing_reply",
+        description="主人回一句「去吧」就放她出门",
+        event_type=EventType.ON_MESSAGE,
+    )
+    async def handle_outing_reply(
+        self, message: Any = None, stream_id: str = "", **kwargs: Any
+    ) -> Tuple[bool, bool, Optional[str], None, None]:
+        """监听群里的回复，判断这次出门批不批。"""
+
+        note: Optional[str] = None
+        self._remember_stream(stream_id, kwargs)
+        try:
+            note = await self._check_outing_reply(message, stream_id, dict(kwargs))
+        except Exception as exc:  # noqa: BLE001
+            self.ctx.logger.warning("[maimai_bridge] 出门回复处理失败：%s", exc)
+        return True, True, note, None, None
+
+    @Tool(
+        "ask_permission",
+        description=(
+            "想自己出去看看之前，先用这个问一声。会发一条申请给主人，"
+            "他回「去吧」之后你才有一段自由时间，到点要回来。"
+            "别不打招呼就出去，也别反复申请。"
+        ),
+        parameters=[
+            ToolParameterInfo(
+                name="reason",
+                param_type=ToolParamType.STRING,
+                description="想去干什么（一句话）",
+                required=True,
+            ),
+            ToolParameterInfo(
+                name="minutes",
+                param_type=ToolParamType.INTEGER,
+                description="大概要多久（分钟），留空用默认值",
+                required=False,
+            ),
+            ToolParameterInfo(
+                name="sites",
+                param_type=ToolParamType.STRING,
+                description="想去哪些地方（如 B站、Steam），可不填",
+                required=False,
+            ),
+        ],
+    )
+    async def tool_ask_permission(
+        self, reason: str = "", minutes: int = 0, sites: str = "", **kwargs: Any
+    ) -> Dict[str, Any]:
+        """发起一次出门申请。"""
+
+        stream_id = str(kwargs.get("stream_id") or "")
+        cfg = self.config.outing
+        name = "ask_permission"
+
+        if not cfg.enabled:
+            return {"name": name, "content": "出门申请这套流程关着，现在不用问，但也没人替你看着时间。"}
+        if not reason.strip():
+            return {"name": name, "content": "得先说清楚想干什么——一句话就行，比如「想看看B站上那个新游戏」。"}
+
+        data = self._load_outing()
+        lease = self._active_lease(data)
+        if lease is not None:
+            left = _human_minutes(float(lease.get("until") or 0) - time.time())
+            return {"name": name, "content": f"你已经出去了，还剩 {left}，先去忙你的，别重复申请。"}
+        pending = data.get("pending")
+        if isinstance(pending, dict):
+            return {"name": name, "content": "上一条还没回呢，等主人说一句，别催。"}
+
+        limit = int(cfg.daily_limit or 0)
+        if limit > 0 and int(data.get("used") or 0) >= limit:
+            return {"name": name, "content": f"今天已经出去 {limit} 次了，明天再说吧。"}
+        if not stream_id:
+            return {"name": name, "content": "这边没有会话可发，问不了主人——得在有人的地方申请。"}
+
+        mins = int(minutes or 0) or int(cfg.default_minutes or 30)
+        mins = max(1, min(int(cfg.max_minutes or 120), mins))
+        pid = uuid.uuid4().hex[:6]
+        data["pending"] = {
+            "id": pid,
+            "stream_id": stream_id,
+            "user_id": str(kwargs.get("user_id") or ""),
+            "reason": reason.strip()[:200],
+            "sites": sites.strip()[:100],
+            "minutes": mins,
+            "created_at": time.time(),
+        }
+        self._save_outing(data)
+
+        where = f"（{sites.strip()[:40]}）" if sites.strip() else ""
+        await self._notify(
+            stream_id,
+            f"主人，我想出去转一会儿{where}——{reason.strip()[:80]}。\n"
+            f"大概 {mins} 分钟，可以吗？（回一句「去吧」就行）",
+        )
+        return {
+            "name": name,
+            "content": f"已经问过主人了（申请号 {pid}，{mins} 分钟）。等他说一声再去，别自己先跑。",
+        }
+
+    @Tool(
+        "end_outing",
+        description=(
+            "自己觉得转够了就早点回来，用这个结束，并把看到的东西说一句。"
+            "不说也行，到点会自动结束。"
+        ),
+        parameters=[
+            ToolParameterInfo(
+                name="summary",
+                param_type=ToolParamType.STRING,
+                description="回来想说的一句（看到了什么、有什么感觉），可不填",
+                required=False,
+            ),
+        ],
+    )
+    async def tool_end_outing(self, summary: str = "", **kwargs: Any) -> Dict[str, Any]:
+        """提前结束出门。"""
+
+        name = "end_outing"
+        data = self._load_outing()
+        lease = self._active_lease(data)
+        if lease is None:
+            return {"name": name, "content": "现在没在外面（要么没出去，要么已经到点了）。"}
+
+        left = float(lease.get("until") or 0) - time.time()
+        data["lease"] = None  # 提前回来就不再挂着这张通行证
+        self._save_outing(data)
+        if self.config.outing.report_on_end:
+            await self._report_back(lease, extra=summary)
+        else:
+            await self._notify(
+                str(lease.get("stream_id") or ""),
+                f"我回来啦，比预计早了 {_human_minutes(left)}。",
+            )
+        return {
+            "name": name,
+            "content": f"已经结束这次出门，还剩 {_human_minutes(left)}。",
+        }
+
+    @Tool(
+        "outing_status",
+        description="看看今天出门了几次、有没有还在有效期里的通行证、有没有等你回的申请。",
+        parameters=[],
+    )
+    async def tool_outing_status(self, **kwargs: Any) -> Dict[str, Any]:
+        """出门状态。"""
+
+        cfg = self.config.outing
+        data = self._load_outing()
+        used = int(data.get("used") or 0)
+        limit = int(cfg.daily_limit or 0)
+        limit_text = "不限" if limit <= 0 else str(limit)
+
+        if not cfg.enabled:
+            return {"name": "outing_status", "content": "出门申请关着，随便看（也没有时间限制）。"}
+
+        lines = [f"今天（{data.get('date')}）出去 {used} 次，上限 {limit_text}。"]
+        admins = self._admin_ids()
+        if admins:
+            shown = "、".join(admins[:3]) + ("…" if len(admins) > 3 else "")
+            lines.append(f"管理员：{shown}。")
+        else:
+            lines.append("还没设管理员 QQ（谁发起申请就等谁回）。")
+
+        lease = self._active_lease(data)
+        if lease is not None:
+            left = _human_minutes(float(lease.get("until") or 0) - time.time())
+            reason = str(lease.get("reason") or "").strip()
+            tail = f"（{reason[:40]}）" if reason else ""
+            lines.append(f"通行证有效，还剩 {left}{tail}。")
+        else:
+            lines.append("现在没有通行证。")
+
+        pending = data.get("pending")
+        if isinstance(pending, dict):
+            wait = int(time.time() - float(pending.get("created_at") or 0))
+            lines.append(f"有一条申请还等着回（{pending.get('minutes')} 分钟，已经等了 {wait} 秒）。")
+        else:
+            lines.append("没有待回的申请。")
+
+        auto = self._auto_state(data)
+        if cfg.auto_enabled:
+            auto_limit = int(cfg.auto_daily_limit or 0)
+            auto_limit_text = "不限" if auto_limit <= 0 else str(auto_limit)
+            where = "在时段内" if self._in_windows(cfg.auto_windows) else "不在时段内"
+            lines.append(
+                f"自己想起来：开着（{cfg.auto_windows}，今天叫过 {auto.get('count')} 次，"
+                f"上限 {auto_limit_text}，现在{where}）。"
+            )
+            if not self._auto_stream(data):
+                lines.append("但是还没在任何一个群里说过话，不知道该去哪儿叫她。")
+        else:
+            lines.append("自己想起来：关着（得有人先撩一句，她才会申请）。")
+
+        return {"name": "outing_status", "content": "\n".join(lines)}
+
+
+#: DSH 想借她的嘴说话时，用这对标记把台词圈出来。
+_SPEAK_RE = re.compile(r"\[\[\s*speak\s*\]\](.*?)\[\[\s*/\s*speak\s*\]\]", re.DOTALL)
+
+#: 代发红线：钱和账号的事，DSH 写得再好也不替她说。
+_RELAY_REDLINES: Tuple[str, ...] = (
+    "转账",
+    "汇款",
+    "收款码",
+    "付款",
+    "支付",
+    "密码",
+    "验证码",
+    "银行卡",
+    "身份证",
+    "实名",
+    "借钱",
+    "扫码",
+)
+
+#: 代发红线：不能替她 @ 所有人。
+_RELAY_MENTIONS: Tuple[str, ...] = ("@所有人", "@全体成员", "@all", "@everyone")
+
+#: 交给 DSH 的任务末尾附上这句，它才知道自己有「借嘴说话」这个通道。
+_RELAY_HINT = (
+    "（备注：如果你有话想直接发到群里，用 [[speak]]这句话[[/speak]] 包起来，"
+    "我会替你发出去；不想说就别写。）"
+)
+
+
+def _extract_speak(text: str) -> Tuple[list, str]:
+    """从 DSH 答复里抽出要代发的台词，并把标记从正文里剥掉。
+
+    返回 ``(台词列表, 剥干净的正文)``。为什么要把标记剥掉：这段正文会原样
+    交给麦麦当上下文，留着 ``[[speak]]`` 她可能会照着念出来。
+    """
+
+    raw = text or ""
+    lines = [m.strip() for m in _SPEAK_RE.findall(raw) if m.strip()]
+    cleaned = _SPEAK_RE.sub("", raw)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return lines, cleaned
+
+
+def _contains_any(text: str, words: str) -> bool:
+    """文本里有没有这些词中的任何一个（中英文逗号都认）。"""
+
+    hay = (text or "").strip().lower()
+    if not hay:
+        return False
+    for word in str(words or "").replace("，", ",").split(","):
+        w = word.strip().lower()
+        if w and w in hay:
+            return True
+    return False
+
+
+def _human_minutes(seconds: float) -> str:
+    """把秒数说成人话。"""
+
+    m = int(max(0.0, float(seconds or 0)) // 60)
+    if m <= 0:
+        return "不到 1 分钟"
+    if m >= 60:
+        hours, rest = divmod(m, 60)
+        return f"{hours} 小时 {rest} 分钟" if rest else f"{hours} 小时"
+    return f"{m} 分钟"
 
 
 def _look_help_text() -> str:
