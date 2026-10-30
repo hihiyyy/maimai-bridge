@@ -1,4 +1,4 @@
-# Maibot × DSH 桥
+# Maibot互联DSH
 
 把 [MaiBot（麦麦）](https://github.com/Mai-with-u/MaiBot) 和 [DeepSeek Harness（DSH）](https://github.com/deepseek-ai) 接起来：
 
@@ -10,6 +10,8 @@
 **版本 1.0.0** · 自用项目 · MIT
 
 ---
+
+**交流群：1033542800**
 
 ## ⚠️ 这是我自用的插件，不是通用产品
 
