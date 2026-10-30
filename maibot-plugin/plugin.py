@@ -2063,6 +2063,65 @@ class MaiMaiBridgePlugin(MaiBotPlugin):
         )
         return answer
 
+    @Command(
+        "dshhelp",
+        description="用 /dshhelp 看这个插件所有指令和当前开关",
+        pattern=r"^/dshhelp$",
+    )
+    async def command_dshhelp(self, **kwargs: Any) -> Tuple[bool, str, bool]:
+        """把能用的指令、她那几个开关、管理员是谁、今天用了多少，一次摊开。"""
+
+        stream_id = str(kwargs.get("stream_id") or "")
+        outing = self.config.outing
+        taste = self.config.taste
+        relay = self.config.relay
+
+        admins = self._admin_ids()
+        admin_line = "、".join(admins) if admins else "还没设（谁申请就等谁回）"
+
+        outing_state = self._load_outing()
+        auto = self._auto_state(outing_state)
+        taste_state = self._load_taste()
+        relay_state = self._load_relay()
+        used = int(outing_state.get("used") or 0)
+        touched = len(taste_state.get("liked") or []) + len(
+            taste_state.get("faved") or []
+        )
+        where = "正在外面" if self._active_lease(outing_state) else "没在外面"
+
+        def mark(flag: bool) -> str:
+            return "开" if flag else "关"
+
+        text = "\n".join(
+            [
+                "📖 Maibot互联DSH · 说明书",
+                "",
+                "【聊天指令】",
+                "/看 <平台> <关键词>　去那个平台看一眼",
+                "/看视频 <BV号/链接/关键词>　真打开视频读内容",
+                "/dshhelp　这张表",
+                "能结构化读的站：B站 · Steam · GitHub · 微博 · 豆瓣 · 小黑盒",
+                "（贴吧 / 知乎 / 小红书 经常被验证挡住，会直接说没看成）",
+                "",
+                "【她会自己做的事】",
+                f"· 出门要打招呼：{mark(outing.enabled)}（想出去先问你，回「去吧」就批）",
+                f"· 自己想起来：{mark(outing.auto_enabled)}（{outing.auto_windows}，每天 {outing.auto_daily_limit} 次）",
+                f"· 看到喜欢的点赞收藏：{mark(taste.enabled)}（每天 {taste.daily_limit} 次）",
+                f"· 让 DSH 借她的嘴说一句：{mark(relay.enabled)}（每天 {relay.daily_limit} 句）",
+                "",
+                "【管理员】",
+                f"能批出门的人：{admin_line}",
+                "其余开关都在 DSH 设置页「Maibot互联DSH」里改，和 config.toml 是同一份。",
+                "",
+                "【今天】",
+                f"出去 {used}/{outing.daily_limit} 次（{where}）"
+                f" · 叫醒 {auto.get('count', 0)}/{outing.auto_daily_limit} 次"
+                f" · 动手 {touched}/{taste.daily_limit} 次"
+                f" · 代发 {relay_state.get('count', 0)}/{relay.daily_limit} 句",
+            ]
+        )
+        return await self._say(stream_id, text, "显示了 /dshhelp")
+
     async def _impression(self, stream_id: str, label: str, what: str, digest: str) -> None:
         """看完之后补一句她自己的观感。
 

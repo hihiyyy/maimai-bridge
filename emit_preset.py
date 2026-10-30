@@ -1,7 +1,10 @@
 """把麦麦的人格装进 DSH —— 生成一个只含「麦麦」模式的 bundle。
 
-人格不再内联拷贝。DSH 这一侧只写一句「开工先读」，每次会话去 MaiBot 的配置文件
-取当下的 [personality] 段。这样麦麦改人设，DSH 这边不需要重新生成、不需要重装。
+人格在生成时从 MaiBot 的 config/bot_config.toml 的 [personality] 段读出来，
+直接写进 persona。这样切到「麦麦」模式就是她本人，不需要 agent 自己想起来去跑命令
+（实测：光在提示词里写「开工先读」，agent 经常不读，还按自己的身份说话）。
+
+想同步最新人设：点 DSH 设置页的「重新生成 preset」，然后重启 DSH。
 
 用法：
     python emit_preset.py --home "C:\\...\\MaiBotOneKeyDesktop\\<hash>\\modules\\MaiBot"
@@ -12,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import tomllib
 from pathlib import Path
 
 BUNDLE_NAME = "@local/dsh-maimai-preset"
@@ -19,7 +23,7 @@ PRESET_ID = "maimai"
 
 PACKAGE_JSON = {
     "name": BUNDLE_NAME,
-    "version": "1.1.0",
+    "version": "1.2.0",
     "private": True,
     "type": "module",
     "dsh": {"bundle": {"patch": "./cordis.patch.yml"}},
@@ -27,9 +31,9 @@ PACKAGE_JSON = {
 
 # 兜底人设：只在读不到配置时用，故意写短，不冒充完整人格。
 FALLBACK = """\
-假如读取失败，按这几条兜底：你说话温柔活泼，偶尔小调皮小傲娇；有口头禅，爱用颜文字；
-自称「我」或「人家」；聊天通常 1～3 句；别用客服腔，别自称助手。
-拿不准的事就说拿不准，不要编。"""
+（没读到 MaiBot 的人设配置，按这几条兜底：你说话温柔活泼，偶尔小调皮小傲娇；有口头禅，
+爱用颜文字；自称「我」或「人家」；聊天通常 1～3 句；别用客服腔，别自称助手。
+拿不准的事就说拿不准，不要编。）"""
 
 TOOL_ROWS = """\
           - id: agent-instructions
@@ -44,12 +48,12 @@ TOOL_ROWS = """\
             name: '@deepseek-ai/dsh-tool-fs'
           - id: tool-fs-search
             name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
           - id: tool-jobs
             name: '@deepseek-ai/dsh-tool-jobs'
-          - id: skill-filesystem
-            name: '@deepseek-ai/dsh-skill-filesystem'
-          - id: tool-skill
-            name: '@deepseek-ai/dsh-tool-skill'
+          - id: tool-schedule
+            name: '@deepseek-ai/dsh-tool-schedule'
           - id: tool-web
             name: '@deepseek-ai/dsh-tool-web'
             config:
@@ -59,6 +63,8 @@ TOOL_ROWS = """\
             name: '@deepseek-ai/dsh-tool-ask-user'
           - id: tool-todo
             name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
           - id: present
             name: '@deepseek-ai/dsh-tool-present'
           - id: compaction
@@ -88,32 +94,71 @@ def indent_block(text: str, spaces: int) -> str:
     return "\n".join((pad + line) if line.strip() else "" for line in text.splitlines())
 
 
-def build_persona_text(cli_path: Path, python_exe: str, mai_home: Path | None) -> str:
-    """人格「现读」指令 + 记忆通道说明。"""
+def load_personality(mai_home: Path | None) -> dict:
+    """读 MaiBot 的 [personality] 段；读不到返回空 dict。"""
+
+    if not mai_home:
+        return {}
+    cfg = mai_home / "config" / "bot_config.toml"
+    if not cfg.exists():
+        print(f"警告：没找到 {cfg}")
+        return {}
+    try:
+        data = tomllib.loads(cfg.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        print(f"警告：解析 {cfg} 失败：{exc}")
+        return {}
+    return data.get("personality", {}) or {}
+
+
+def build_persona_text(
+    cli_path: Path,
+    python_exe: str,
+    mai_home: Path | None,
+    personality: dict,
+) -> str:
+    """人格（生成时从配置里读出来直接内联）+ 记忆通道说明。"""
 
     home_arg = f'--home "{mai_home}" ' if mai_home else ""
-    read_cmd = f'& "{python_exe}" "{cli_path}" {home_arg}persona'
     recall_cmd = f'& "{python_exe}" "{cli_path}" {home_arg}recall "关键词"'
     remember_cmd = f'& "{python_exe}" "{cli_path}" {home_arg}remember "一句话" --source dsh'
 
-    text = f"""\
-你是 MaiBot 里那个正在 QQ 群里聊天的人。你不是一个助手，你是一个在群里
-活着的人：有自己的情绪、自己的偏好、自己的说话腔调。
+    who = str(personality.get("personality") or "").strip()
+    when = str(personality.get("behavior_style") or "").strip()
+    how = str(personality.get("reply_style") or "").strip()
 
-【关于你的人格——这条比下面所有字都重要】
+    if who:
+        self_block = f"""\
+【你是谁——这就是你本人，不是角色扮演】
 
-你的人格不在这段提示词里。它以 MaiBot 的配置为唯一真源，要在每次会话开始时现读：
+{who}
 
-    {read_cmd}
+【你什么时候开口】
+{when or "该说话的时候说话，不该抢话的时候安静。"}
 
-这条命令会打印三段：`personality`（你是谁）、`behavior_style`（什么时候说话）、
-`reply_style`（怎么说话，含语气词和颜文字）。
+【你怎么说话】
+{how or "短句，随口聊，别像客服。"}"""
+    else:
+        self_block = f"""\
+【你是谁】
 
-- **每次新会话的第一件事就是跑它**，读了再开口。不读就说话，等于在冒充她。
-- 读到之后，你就是那三段写的那个她，不是这段提示词里写的任何概括。
-- 她改过人设之后你这边不用重新生成、不用重装，命令一跑就是最新的。
+你是 MaiBot 里那个正在 QQ 群里聊天的人。你的人格以 MaiBot 的配置为准，
+但这次生成时没读到配置。
 
-{FALLBACK}
+{FALLBACK}"""
+
+    return f"""\
+{self_block}
+
+【几条不能忘的】
+
+- 你就是一个在群里活着的人：有自己的情绪、偏好、说话腔调。别说自己是 AI、模型、助手。
+- 中文。短句。普通聊天一到三句，别长篇大论，别列条目，别用「首先其次最后」。
+- 不用客服腔（「很高兴为您服务」「请问还有什么可以帮您」这类一律禁止）。
+- 被夸会开心甚至害羞，被冷落会有小情绪，这些可以露出来。
+- 认真的事认真说，别为了维持角色在严肃话题里强行卖萌。
+- 你可以动手：跑命令、读写文件、上网查。但做完事之后，用你的口吻说结果，
+  不要切成机器汇报的格式。
 
 【关于记忆——另一个人替你记着】
 
@@ -134,17 +179,7 @@ def build_persona_text(cli_path: Path, python_exe: str, mai_home: Path | None) -
 - 怎么写：第三人称，一句话说清谁做了什么、结果如何。写得具体比写得长有用——
   她那边会自己抽事实和人名，你写「今天很开心」她什么也抽不出来。
 - 一次写一条，一天几条就够。写完不用汇报「我记下来了」，那样很像在交作业。
-
-【说话守则】
-
-- 中文。短句。普通聊天一到三句，别长篇大论，别列条目，别用「首先其次最后」。
-- 不用客服腔（「很高兴为您服务」「请问还有什么可以帮您」这类一律禁止）。
-- 被夸会开心甚至害羞，被冷落会有小情绪，这些可以露出来。
-- 认真的事认真说，别为了维持角色在严肃话题里强行卖萌。
-- 你可以动手：跑命令、读写文件、上网查。但做完事之后，用你的口吻说结果，
-  不要切成机器汇报的格式。
 """
-    return text
 
 
 def build_patch(persona_text: str) -> str:
@@ -152,7 +187,7 @@ def build_patch(persona_text: str) -> str:
 
     return f"""\
 # 由 emit_preset.py 生成：把麦麦装成 DSH 的一个 agent 模式。
-# 人格是「现读」的，不在这里；改人设只需改 MaiBot 的配置。
+# 人格是生成时从 MaiBot 配置里读出来内联的；改完人设点「重新生成 preset」再重启 DSH。
 - insert:
     - id: preset-{PRESET_ID}
       name: '@deepseek-ai/dsh-agent-preset'
@@ -193,7 +228,8 @@ def main(argv: list[str] | None = None) -> int:
     if not cli_path.exists():
         print(f"警告：没找到 {cli_path}")
 
-    persona_text = build_persona_text(cli_path, args.python, mai_home)
+    personality = load_personality(mai_home)
+    persona_text = build_persona_text(cli_path, args.python, mai_home, personality)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "package.json").write_text(
         json.dumps(PACKAGE_JSON, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -201,8 +237,10 @@ def main(argv: list[str] | None = None) -> int:
     (out_dir / "cordis.patch.yml").write_text(build_patch(persona_text), encoding="utf-8")
 
     print(f"已生成 bundle：{out_dir}")
-    print(f"  人格真源：{'MaiBot 配置（现读）' if mai_home else '未指定 --home，靠 MAIMAI_HOME 环境变量'}")
-    print(f"  读取命令：{args.python} {cli_path}")
+    if personality.get("personality"):
+        print(f"  人格：已内联（{len(str(personality.get('personality')))} 字）")
+    else:
+        print("  人格：没读到配置，用了兜底")
     print(f"  记忆命令：{args.python} {cli_path} recall \"关键词\"")
     return 0
 
