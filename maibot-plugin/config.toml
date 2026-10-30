@@ -1,0 +1,19 @@
+[plugin]
+config_version = "1.1.0"
+
+# —— 总开关 ——
+enabled = true
+
+# —— 记忆互通 ——
+recall_limit = 5
+allow_memory_write = true
+
+# —— 双向互联：调 DSH ——
+dsh_command = "dsh"
+dsh_profile = "headless"
+dsh_timeout_seconds = 240
+dsh_cwd = ""
+dsh_extra_args = ""
+
+# —— 双向互联：让麦麦说话 ——
+speak_model = ""

@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="麦麦">
+  <defs>
+    <linearGradient id="maimai-fur" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8fdcff"/>
+      <stop offset="1" stop-color="#3b8fd6"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="#12263a"/>
+  <path d="M17 27 L14 12 L28 21 Z" fill="url(#maimai-fur)"/>
+  <path d="M47 27 L50 12 L36 21 Z" fill="url(#maimai-fur)"/>
+  <path d="M8 42 Q16 47 13 55 Q7 56 6 49 Z" fill="url(#maimai-fur)" opacity="0.85"/>
+  <ellipse cx="32" cy="37" rx="17" ry="15" fill="url(#maimai-fur)"/>
+  <ellipse cx="32" cy="45" rx="10" ry="7" fill="#eaf7ff"/>
+  <circle cx="25" cy="34" r="2.4" fill="#12263a"/>
+  <circle cx="39" cy="34" r="2.4" fill="#12263a"/>
+  <path d="M29 40 L32 42 L35 40" stroke="#12263a" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

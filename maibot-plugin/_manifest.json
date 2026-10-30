@@ -1,0 +1,42 @@
+{
+  "manifest_version": 2,
+  "version": "1.1.0",
+  "name": "麦麦 × DSH 桥",
+  "description": "在麦麦和 DeepSeek Harness 之间搭一座桥：互通人格与记忆，并允许两边互相调用",
+  "author": {
+    "name": "lirick",
+    "url": "https://github.com/MaiM-with-u"
+  },
+  "license": "GPL-v3.0-or-later",
+  "urls": {
+    "repository": "https://github.com/MaiM-with-u/maibot",
+    "homepage": "https://github.com/MaiM-with-u/maibot",
+    "documentation": "https://github.com/MaiM-with-u/maibot",
+    "issues": "https://github.com/MaiM-with-u/maibot/issues"
+  },
+  "changelog": "CHANGELOG.md",
+  "host_application": {
+    "min_version": "1.3.0",
+    "max_version": "1.3.99"
+  },
+  "sdk": {
+    "min_version": "2.0.0",
+    "max_version": "2.99.99"
+  },
+  "dependencies": [],
+  "capabilities": [
+    "personality.get_current",
+    "knowledge.search",
+    "maisaka.reply.generate",
+    "maisaka.proactive.trigger",
+    "send.text"
+  ],
+  "i18n": {
+    "default_locale": "zh-CN",
+    "locales_path": "_locales",
+    "supported_locales": [
+      "zh-CN"
+    ]
+  },
+  "id": "lirick.maimai-bridge"
+}

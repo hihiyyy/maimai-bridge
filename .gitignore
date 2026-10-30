@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 只属于本机的东西，绝不提交
+sync-state.json
+sync.log
+sync.log.old
+persona.md
+settings.json
+*.bak
+
+# emit_preset.py 生成出来的 preset（每台机器路径不同，自己生成）
+dsh-preset/
+
+# 编辑器
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

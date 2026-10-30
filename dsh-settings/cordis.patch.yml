@@ -1,0 +1,4 @@
+- insert:
+    - id: maimai-settings
+      name: '@local/dsh-maimai-settings'
+      config: {}
