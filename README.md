@@ -7,7 +7,7 @@
 > MaiBot 的设计原则是「最像，而不是最好」——她不该长成一个什么都能干的机器人。
 > 所以这个项目不给她加功能，只在她需要动手的时候，把活递给 DSH，干完再以她自己的口吻说出来。
 
-**版本 1.0.1** · 自用项目 · MIT
+**版本 1.1.0** · 自用项目 · MIT
 
 ---
 
@@ -17,12 +17,12 @@
 
 写清楚免得你踩坑：
 
-- **只在我自己那台机器上跑通过**：Windows + MaiBot 1.3.19 一键包 + DSH 桌面版。Linux、Docker、macOS 全没试过。
-- **路径是硬编码的**：配置默认指向我本机的目录结构，你得自己在设置页改 `settings.json`。
+- **只在 Windows 上跑通过**：本机 MaiBot 1.3.19 一键包 + DSH 桌面版，服务器 Windows Server 2022 + MaiBot 1.3.18。Linux、Docker、macOS 全没试过。
+- **路径不写死，但要看环境**：脚本会自动找一键包目录，也能用 `--maibot` / 环境变量 `MAIBOT_HOME` 指定；WebUI 地址从 `bot_config.toml` 的 `[http].port` 读。指定了却对不上会直接报错，不会静默退到别的路径。
 - **依赖几个第三方东西**：Playwright + 本机 Edge、一个能用的 B 站登录态、MaiBot 的 `plugin_runtime`（1.3.x）。少一样就有一段功能是灰色的。
 - **接口是跟着 MaiBot 源码走的**：`@Command`、`ctx.maisaka.*` 这些没有稳定承诺，MaiBot 升级可能直接打断。
-- **没有测试、没有 CI**：所有「能跑」都是我在群里手点出来的。
-- **1.0.0 是「功能齐了」的正式版**，不是「打磨好了」的成熟版。之前的 1.9.x–2.4.0 是开发期编号，现在归一到 1.0。
+- **有 111 条单元测试，没有 CI**：`python -m pytest` 直接跑；CI 还没上，发版靠手点。
+- **1.1.0 是「按官方结构重写」的版本**，不是「加了新功能」的版本——功能和 1.0.x 一样，改的是里面怎么放（拆模块、硬编码下沉成配置、数据目录统一）。之前的 1.9.x–2.4.0 是开发期编号，现在归一到 1.1。
 
 如果你要的是一个能长期维护的项目，这里大概率不是。但如果你也在折腾「让 bot 有点自主性」这件事，里面的踩坑记录应该能省你几天。
 
@@ -55,7 +55,7 @@
 她越能自己动，越需要有人踩刹车。这里有三层：
 
 1. **出门要打招呼**：她自己出不去。要先发申请、等你点头、拿到限时通行证，到点自动失效。
-2. **动作白名单**：`page_act` 只许 read / click / type / scroll / press / back。另有两条**写死的红线**（配置文件改不了）——碰「付款、下单、改密码、注销账号」这类，和「发评论、发私信、@所有人」这类，直接拒绝并说明碰到哪一步。
+2. **动作白名单**：`page_act` 只许 read / click / type / scroll / press / back。另有两条红线——碰「付款、下单、改密码、注销账号」这类，和「发评论、发私信、@所有人」这类，直接拒绝并说明碰到哪一步。这两组词可以在 `[actions].redlines` / `[actions].social_block` 里**继续加**，但只会更严不会更松，内置那批永远生效。
 3. **代发要过审**：DSH 想借她的嘴说话，只能用 `[[speak]]` 声明台词，插件逐条查红线、字数、@所有人、每日额度，通过了才发。
 
 ---
@@ -65,6 +65,7 @@
 ```
 .
 ├── maimai.py             # CLI：读人格 / 检索记忆 / 写入记忆
+├── maibot_paths.py       # 目录与 WebUI 地址统一探测（下面几个脚本共用）
 ├── emit_preset.py        # 生成 DSH 侧「麦麦」模式的 bundle
 ├── persona_sync.py       # 只生成人格文本（emit_preset 的简化版）
 ├── sync_to_maimai.py     # 把 meow-memory 的项目记忆同步进麦麦
@@ -82,7 +83,7 @@
 
 ### 0. 需要什么
 
-- MaiBot（1.3.19 以上）跑起来，WebUI 能打开（端口见 `config/bot_config.toml` 的 `[http].port`，默认 8001）
+- MaiBot（1.3.18 以上，本机 1.3.19 与服务器 1.3.18 都跑过）跑起来，WebUI 能打开（端口见 `config/bot_config.toml` 的 `[http].port`，默认 8001）
 - DSH（带 `webServer` 服务的版本）
 - Python 3.10+（跑桥接脚本）
 - 想用「出去看看 / 看视频」：`pip install playwright` + 本机装了 Edge（用 `channel="msedge"`，不用下载 Chromium）
@@ -97,15 +98,23 @@
 
 ```
 <MaiBot>/plugins/maimai_bridge/
-├── plugin.py
+├── plugin.py             # 插件类与业务流程
+├── config.py             # 配置模型（七节，70 个字段）
+├── constants.py          # 内置默认值 + 解析函数
+├── sites.py              # 站点知识表（模板 / 选择器 / 归属）
+├── __init__.py
 ├── _manifest.json
-├── config.toml
+├── config.toml           # 由 Runner 首次加载按 config.py 生成，不进仓库
 ├── README.md
 ├── CHANGELOG.md
+├── AGENTS.md
+├── docs/architecture.md
+├── tests/                # 111 条单测
+├── pytest.ini
 └── bili_video/           # 看视频与点赞收藏的内置子包
 ```
 
-重启 MaiBot，日志里出现 `[maimai_bridge] 桥插件已加载` 就成了。
+重启 MaiBot，日志里出现 `[maimai_bridge] 桥插件已加载` 就成了。之后改插件可以在 WebUI 插件管理里点「重新加载」，不用整个重启；只有动了 SDK 或依赖包才必须重启。
 
 ### 2. 扫码登录
 
@@ -175,7 +184,9 @@ schtasks /create /tn "MaiBot-Sync-AM" /sc daily /st 09:00 /tr "powershell -NoPro
 | `end_outing` | 提前结束出门并汇报 |
 | `outing_status` | 现在能不能出去 |
 
-另有一个消息事件 `outing_reply`：监听你对出门申请的回复（「去吧」/「算了」）。
+另有一个 Hook：`slash_bridge`，挂在主程序的 `chat.receive.after_process` 上，负责两件事——兜底认 `/看` `/看视频` `/dshhelp` 这三条斜杠命令（命令注册层没接住时照样能用），以及接你对出门申请的回复（「去吧」/「算了」）。命中之后它会 `abort` 掉后续处理，所以一条命令不会被回两遍。
+
+> 为什么要有这个兜底：主程序里 `EventType.ON_MESSAGE` 的发射点目前是注释掉的，所以老写法 `@EventHandler(ON_MESSAGE)` 根本不会触发；而 `@Command` 在部分实例上会出现命令注册成功、`find_command_by_text` 却返回 `None` 的情况（见 [issue #1](https://github.com/hihiyyy/maimai-bridge/issues/1)）。走 Hook 这条路稳定得多。
 
 ---
 
@@ -203,13 +214,16 @@ schtasks /create /tn "MaiBot-Sync-AM" /sc daily /st 09:00 /tr "powershell -NoPro
 
 | 段 | 管什么 |
 |---|---|
-| `[plugin]` | 总开关、记忆条数、DSH 命令与超时、说话用哪个模型、**全局管理员 QQ**（逗号分隔多个） |
-| `[browse]` | 浏览器：开不开、用哪个 channel、无头不无头、超时、每小时额度、**是否用持久 profile**（登录态） |
-| `[actions]` | `page_act`：开不开、允许哪些动作、一次最多几步、每步等多久 |
-| `[video]` | 看视频：字幕长度、简介长度、弹幕/评论条数、**凭证文件路径** |
+| `[plugin]` | `allow_dsh`（准不准调 DSH）、记忆条数、DSH 命令与超时、说话用哪个模型、**全局管理员 QQ**（逗号分隔多个） |
+| `[browse]` | 浏览器：开不开、用哪个 channel、无头不无头、超时、每小时额度、**是否用持久 profile**（登录态）、User-Agent、反爬判定词 |
+| `[actions]` | `page_act`：开不开、允许哪些动作、一次最多几步、每步等多久、**额外红线词**（只会更严） |
+| `[video]` | 看视频：字幕长度、简介长度、弹幕/评论条数、**凭证**（`sessdata` / `bili_jct` 手填或走文件）、代理 |
 | `[taste]` | 点赞收藏：开不开、只赞还是也收藏、收藏夹、日额度、冷却、必须说理由、演练模式 |
-| `[outing]` | 出门：开不开、谁说了算、默认/最长时长、每日次数、**自动叫醒**（时段 / 额度 / 冷却 / 自定义台词） |
+| `[outing]` | 出门：开不开、谁说了算、默认/最长时长、每日次数、**自动叫醒**（时段 / 额度 / 冷却 / 自定义台词 / 叫醒哪个群） |
 | `[relay]` | 替她说一句：开不开、每日几句、单句字数上限 |
+
+> `enabled` 是宿主保留键（WebUI 顶部启停 + Runner 激活门禁），插件自己不声明它；插件自己的开关叫 `allow_dsh`。
+> 多值字段在设置页是一格一个，在 `config.toml` 里写成逗号分隔。留空就用 `constants.py` 的内置默认值，想改哪个填哪个，不用整段抄。
 
 DSH 设置页读写的是**同一份 config.toml**，所以两边天然同步——你在哪边改都一样。
 
@@ -225,7 +239,7 @@ DSH 设置页读写的是**同一份 config.toml**，所以两边天然同步—
 python cookie_login.py --site <平台> --maibot "<MaiBot 目录>"
 ```
 
-判断登录成功看的是 Cookie 里的登录标志键，不看页面长什么样：
+判定分两层：先看 Cookie 里出不出现该平台的登录标志键，再**拿这个 Cookie 去问一次「我是谁」接口**，接口认了才算真的登录——只看键存不存在会被游客态骗过去（小红书游客也会种 `web_session`，浏览器一开就报「登录成功」）。小红书和豆瓣没有可靠的「我是谁」接口，退回看 Cookie 值跟刚打开时相比有没有变过。
 
 | 平台 | 认的键 |
 |---|---|
@@ -239,13 +253,13 @@ python cookie_login.py --site <平台> --maibot "<MaiBot 目录>"
 | 小红书 | `web_session` |
 | GitHub | `user_session` |
 
-所有平台共用同一个 `browser-profile`，登录态留着，`look_around` 走出去也带着。
+所有平台共用同一个 `browser-profile`（在 `data/plugins/lirick.maimai-bridge/` 下），登录态留着，`look_around` 走出去也带着。
 
 ### 手工（B站 专用）
 
 浏览器 F12 → Application → Cookies → bilibili.com → 复制 `SESSDATA`，贴在设置页的输入框里。
 
-读字幕需要它，所以 B 站还会额外写一份 `data/plugins/maibot.bilibili-browser/bili_credential.json` 给「刷B站」插件用。
+读字幕需要它，所以 B 站还会额外写一份 `data/plugins/lirick.maimai-bridge/bili_credential.json`（插件自己的数据目录）给「刷B站」插件用。
 
 ---
 
@@ -272,7 +286,7 @@ python cookie_login.py --site <平台> --maibot "<MaiBot 目录>"
 留在这里，省你重踩一遍：
 
 1. **`_manifest.json` 带 BOM 会静默不加载**。PowerShell 的 `Set-Content -Encoding UTF8` 默认加 BOM，MaiBot 报 `Unexpected UTF-8 BOM` 后连失败上报都挂掉。写文件要用 `UTF8Encoding($false)`。
-2. **插件数据目录 ≠ MaiBot 数据目录**。`_video_data_dir()` 返回的是 MaiBot 的 `data/`，不是插件自己的子目录，写凭证写偏了就是「明明配好了却读不到」。
+2. **数据目录要统一到 `ctx.paths.data_dir`**。以前 `_taste_path` / `_relay_path` / `_outing_path` 各自又拼了一层 `plugins/maimai_bridge/`，同一份数据躺在 `data/plugins/<id>/plugins/maimai_bridge/` 底下多一层，写凭证写偏了就是「明明配好了却读不到」。1.1.0 起全部收进一个根，`on_load` 会自动把老路径的数据搬过来。
 3. **`@Command` 的返回值不会发出去**。三元组里第二项只是日志文本，要发言必须自己 `await self.ctx.send.text(...)`。
 4. **适配器配反**。一键包默认开着 `snowluma-adapter`（连 7988）把 `napcat-adapter`（连 7998）关着，结果收得到消息发不出去。而且 `napcat-adapter` 的 manifest 写着 `max_version 1.2.99`，Host 1.3.19 直接拒绝加载——所有斜杠命令一起失效。
 5. **`_resolve_recipe("微博", ...)` 查不到 `"weibo"`**。查表前不规范化输入，配方永远是空，还不报错。
@@ -280,11 +294,14 @@ python cookie_login.py --site <平台> --maibot "<MaiBot 目录>"
 7. **`pass` 是 Python 关键字**，pydantic 字段名用不了，`alias` 也救不回来，只能换段名。
 8. **DSH 插件的 Host 侧不热重载**。改 `index.js` 必须重启 DSH，改 `client.js` 却能靠 HMR 自动生效——两边版本不一致时会出现「页面报未知接口」。
 9. **`-Tail` 看日志会被刷屏冲掉**。适配器每 5 秒重连一次，把启动那几行淹了，得整文件搜。
+10. **多副本同步别用 `robocopy /MIR` 往回同步**。`/MIR` 是「让目标变得和源一模一样」，会删掉目标里源没有的文件。这个插件有三处副本（仓库 / 一键包 / 调试副本），只能从仓库单向往外推；拿某个副本当源往回同步，会把刚写好的文件删掉、把文档退回旧版、把 LF 换成 CRLF（踩过：`tests/` 和 `pytest.ini` 被整目录删掉）。
+11. **`EventType.ON_MESSAGE` 已经没有发射点了**。主程序里那行是注释掉的，所以用 `@EventHandler(ON_MESSAGE)` 写的处理器永远不会被调用——老代码里的 `outing_reply` 就这么死的。要处理消息走 `@HookHandler("chat.receive.after_process")`。
 
 ---
 
 ## 版本
 
+- **1.1.0**（2026-10-31）：按官方结构重写——`config.py` / `constants.py` / `sites.py` 从 `plugin.py` 里拆出来，硬编码（User-Agent、反爬判定词、动作红线、站点选择器）全部下沉成配置，`[plugin].enabled` 改名 `allow_dsh`，数据统一到 `ctx.paths.data_dir`，70 个配置字段全配中文名，另补 111 条单元测试。功能和 1.0.x 一样。
 - **1.0.1**（2026-10-31）：加 `/dshhelp` —— 一张说明书，列出聊天指令、她现在的开关状态、管理员是谁、今天动过几次手。同时修好 DSH 侧「麦麦」模式：人格从「每次会话现读」改成生成时内联（现读要靠 agent 主动跑命令，跑不到就退回兜底人设），并补齐两个工具的必填配置。
 - **1.0.0**（2026-10-31）：功能齐了。人格/记忆互通、双向调用、九个平台扫码登录、看网页翻页、看视频、点赞收藏、出门通行证、自动叫醒、代发。
 - 开发期编号 1.1.0 → 2.4.0 已合并进 1.0.0，详见 `maibot-plugin/CHANGELOG.md`。
