@@ -34,6 +34,10 @@
   `EventType.ON_MESSAGE` 的发射点是注释掉的，它一直是死代码；出门回复本来就由
   `slash_bridge` 这个 HookHandler 接。
 - 文档同步：README 的目录结构、配置表、登录说明、红线说明全部按新结构重写。
+- **补了 111 条单元测试**（`tests/`，pytest 9）：配置模型（七节齐全、字段默认值、中文
+  label）、站点表（归一化 / 反查 / 配方覆盖）、默认值解析（留空回退）、目录探测
+  （`MAIBOT_HOME` 优先、指错必须报错）、组件注册（13 个 Tool / 3 个 Command / 1 个
+  HookHandler，命令正则能匹配真实输入）都有覆盖，`python -m pytest` 直接跑。
 
 ## 1.0.1
 
