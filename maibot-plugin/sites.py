@@ -184,6 +184,7 @@ SITE_DOMAINS: Dict[str, List[str]] = {
 #: 按域名猜站点（recipe 兜底用）。顺序即优先级。
 _DOMAIN_HINTS: tuple[tuple[str, str], ...] = (
     ("bilibili.com", "bilibili"),
+    ("b23.tv", "bilibili"),
     ("steampowered.com", "steam"),
     ("steamcommunity.com", "steam"),
     ("github.com", "github"),
