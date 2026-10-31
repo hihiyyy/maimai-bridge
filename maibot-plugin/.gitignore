@@ -1,6 +1,7 @@
 # 运行时数据、不进仓库。
-# config.toml 是个特例：仓库里那份是**模板**（admin_qq 等全部留空）且已被跟踪，
-# 所以这条规则只对「新生成的文件」生效。就地改模板时别把真 QQ 号填进去再提交。
+# config.toml 由 Runner 首次加载时按 config.py 的配置模型自动生成，
+# 每台机器内容不同（admin_qq、登录态、群号这些），所以不进仓库。
+# 想改默认值就改 config.py 里的 Field(default=...)，那才是唯一真源。
 /config.toml
 /data/
 /logins.json
