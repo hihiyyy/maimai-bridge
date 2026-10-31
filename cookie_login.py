@@ -22,48 +22,8 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
+from maibot_paths import find_maibot
 
-def find_maibot(override: str = "") -> Path:
-    """按「命令行 → 环境变量 → 一键包默认位置 → 用户主目录」的顺序找 MaiBot 目录。
-
-    一键包的目录名是个随机 hash，写死在代码里换台机器就废了，所以这里运行时现找。
-    找不到就抛 SystemExit 并提示怎么指定，不静默退到某个可能不存在的路径。
-    """
-    if override:
-        path = Path(override).expanduser()
-        if path.is_dir():
-            return path
-        raise SystemExit(f"--maibot 指向的目录不存在：{path}")
-
-    env = os.environ.get("MAIBOT_HOME", "").strip()
-    if env:
-        path = Path(env).expanduser()
-        if path.is_dir():
-            return path
-        raise SystemExit(f"环境变量 MAIBOT_HOME 指向的目录不存在：{path}")
-
-    candidates = [
-        Path.home() / "AppData" / "Roaming" / "MaiBotOneKeyDesktop",
-        Path.home() / "MaiBot",
-        Path("/opt/maibot"),
-    ]
-    onekey_roots = [c for c in candidates if "MaiBotOneKeyDesktop" in str(c)]
-    for root in onekey_roots:
-        if not root.is_dir():
-            continue
-        # 一键包：<root>\<hash>\modules\MaiBot
-        for child in sorted(root.iterdir(), key=lambda p: p.name, reverse=True):
-            cand = child / "modules" / "MaiBot"
-            if cand.is_dir():
-                return cand
-    for root in candidates:
-        if "MaiBotOneKeyDesktop" not in str(root) and root.is_dir():
-            return root
-
-    raise SystemExit(
-        "找不到 MaiBot 目录。请用 --maibot 指定，或设环境变量 MAIBOT_HOME，"
-        "例如：--maibot \"C:\\Users\\<你>\\AppData\\Roaming\\MaiBotOneKeyDesktop\\<hash>\\modules\\MaiBot\""
-    )
 
 #: 每个平台：怎么打开、认哪个域名、看到哪个 cookie 才算「可能登录了」。
 SITES = {

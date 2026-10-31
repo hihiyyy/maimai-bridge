@@ -571,7 +571,11 @@ window.__ModuleLoader__.load({
           h('div', { style: kvRow },
             h('span', null, h('span', { style: statusDot(!!(status && status.maibotOnline)) }), 'MaiBot 本体'),
             h('span', { style: { color: 'var(--dsw-alias-label-primary)' } },
-              status ? (status.maibotOnline ? 'WebUI 在线（8001）' : '没监听 8001，本体可能没启动') : '读取中…'),
+              status
+                ? (status.maibotOnline
+                  ? `WebUI 在线（${status.webuiPort || 8001}）`
+                  : `没监听 ${status.webuiPort || 8001}，本体可能没启动`)
+                : '读取中…'),
           ),
           h('div', { style: kvRow },
             h('span', null, h('span', { style: statusDot(!!(plugin && plugin.installed)) }), '桥插件'),

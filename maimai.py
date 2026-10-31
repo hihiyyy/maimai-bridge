@@ -9,7 +9,9 @@
     python maimai.py recall "关键词" --limit 5
     python maimai.py remember "今天和她一起把互通调通了" --source dsh:manual
 
-MaiBot 目录默认取环境变量 MAIMAI_HOME，其次是本脚本所在目录的兄弟目录 MaiBot-1.3.4。
+MaiBot 目录依次取 ``--home``、环境变量 ``MAIBOT_HOME``（旧名 ``MAIMAI_HOME`` 仍兼容）、
+一键包默认位置；WebUI 地址依次取 ``--base-url``、环境变量 ``MAIBOT_WEBUI``、
+``config/bot_config.toml`` 里的 ``[http]``。都不写死。
 """
 
 from __future__ import annotations
@@ -25,22 +27,16 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-DEFAULT_MAIBOT_DIR = Path(__file__).resolve().parent.parent / "MaiBot-1.3.4"
-DEFAULT_WEBUI = "http://127.0.0.1:8001"
+from maibot_paths import find_maibot, read_webui_url
 
 # 导入任务的终态
 TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 
 
 def resolve_home(explicit: str | None) -> Path:
-    """确定 MaiBot 目录。"""
+    """确定 MaiBot 目录（交给共用的探测模块）。"""
 
-    if explicit:
-        return Path(explicit).expanduser().resolve()
-    env_home = os.environ.get("MAIMAI_HOME")
-    if env_home:
-        return Path(env_home).expanduser().resolve()
-    return DEFAULT_MAIBOT_DIR
+    return find_maibot(explicit or "")
 
 
 def read_token(home: Path) -> str:
@@ -222,8 +218,8 @@ def main(argv: list[str] | None = None) -> int:
     """命令行入口。"""
 
     parser = argparse.ArgumentParser(description="读写麦麦的记忆与人格")
-    parser.add_argument("--home", help="MaiBot 安装目录（默认取 MAIMAI_HOME 环境变量）")
-    parser.add_argument("--base-url", default=DEFAULT_WEBUI, help="麦麦 WebUI 地址")
+    parser.add_argument("--home", help="MaiBot 安装目录（默认自动探测，可用 MAIBOT_HOME 指定）")
+    parser.add_argument("--base-url", default="", help="麦麦 WebUI 地址（默认从 bot_config.toml 读端口）")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("persona", help="打印麦麦的人格设定")
@@ -242,6 +238,7 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     home = resolve_home(args.home)
+    args.base_url = read_webui_url(home, args.base_url)
 
     if args.command == "persona":
         section = load_personality(home)

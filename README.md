@@ -82,10 +82,14 @@
 
 ### 0. 需要什么
 
-- MaiBot（1.3.19 以上）跑起来，WebUI 能在 `http://127.0.0.1:8001` 打开
+- MaiBot（1.3.19 以上）跑起来，WebUI 能打开（端口见 `config/bot_config.toml` 的 `[http].port`，默认 8001）
 - DSH（带 `webServer` 服务的版本）
 - Python 3.10+（跑桥接脚本）
 - 想用「出去看看 / 看视频」：`pip install playwright` + 本机装了 Edge（用 `channel="msedge"`，不用下载 Chromium）
+
+> 脚本里的 MaiBot 目录和 WebUI 地址都**不写死**：依次取命令行参数、环境变量
+> （`MAIBOT_HOME` / `MAIBOT_WEBUI`）、一键包默认位置、`config/bot_config.toml`。
+> 指定了却对不上会直接报错，不会静默退到别的路径。
 
 ### 1. 麦麦侧插件
 

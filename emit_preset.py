@@ -7,8 +7,11 @@
 想同步最新人设：点 DSH 设置页的「重新生成 preset」，然后重启 DSH。
 
 用法：
-    python emit_preset.py --home "C:\\...\\MaiBotOneKeyDesktop\\<hash>\\modules\\MaiBot"
+    python emit_preset.py
     python emit_preset.py --home <MaiBot目录> --out 某个目录 --python <解释器>
+
+MaiBot 目录和解释器都不写死：目录交给 maibot_paths.find_maibot 自动探测，
+解释器优先用一键包的 python-env（那里面装好了麦麦的依赖），找不到才退到 PATH。
 """
 
 from __future__ import annotations
@@ -18,8 +21,36 @@ import json
 import tomllib
 from pathlib import Path
 
+from maibot_paths import find_maibot
+
 BUNDLE_NAME = "@local/dsh-maimai-preset"
 PRESET_ID = "maimai"
+
+
+def find_python(home: Path, override: str = "") -> str:
+    """挑一个能跑 maimai.py 的 Python 解释器。
+
+    优先级：显式参数 → 一键包的 python-env → 当前解释器 → PATH 里的 python。
+    麦麦的依赖装在它自己的 python-env 里，所以那个最可靠。
+    """
+
+    if override:
+        return override
+
+    # 一键包布局：<hash>/modules/MaiBot → <hash>/python-env/python.exe
+    onekey_venv = home.parent.parent / "python-env"
+    for name in ("python.exe", "python"):
+        candidate = onekey_venv / name
+        if candidate.is_file():
+            return str(candidate)
+
+    # 直接用当前这个解释器也是可以的（它至少能跑标准库部分）
+    import sys
+
+    if sys.executable:
+        return sys.executable
+
+    return "python"
 
 PACKAGE_JSON = {
     "name": BUNDLE_NAME,
@@ -209,27 +240,28 @@ def main(argv: list[str] | None = None) -> int:
     """命令行入口。"""
 
     parser = argparse.ArgumentParser(description="生成麦麦人格的 DSH bundle")
-    parser.add_argument("--home", help="MaiBot 目录（一键包的 modules\\MaiBot）")
+    parser.add_argument("--home", help="MaiBot 目录（默认自动探测，可用 MAIBOT_HOME 指定）")
     parser.add_argument("--out", default="dsh-preset", help="输出目录，默认 ./dsh-preset")
     parser.add_argument("--cli", help="maimai.py 的路径，默认与本脚本同目录")
     parser.add_argument(
         "--python",
-        default="python",
-        help="跑 maimai.py 用的解释器，建议写一键包 python-env 里的绝对路径",
+        default="",
+        help="跑 maimai.py 用的解释器；不填就找一键包的 python-env，再退到 PATH 里的 python",
     )
     args = parser.parse_args(argv)
 
     out_dir = Path(args.out).resolve()
     cli_path = Path(args.cli).resolve() if args.cli else (out_dir.parent / "maimai.py").resolve()
-    mai_home = Path(args.home).resolve() if args.home else None
+    mai_home = find_maibot(args.home or "")
+    python_exe = args.python or find_python(mai_home)
 
-    if mai_home and not (mai_home / "config" / "bot_config.toml").exists():
-        print(f"警告：{mai_home} 下没找到 config\\bot_config.toml，确认 --home 指对了")
+    if not (mai_home / "config" / "bot_config.toml").exists():
+        print(f"警告：{mai_home} 下没找到 config\\bot_config.toml，确认路径指对了")
     if not cli_path.exists():
         print(f"警告：没找到 {cli_path}")
 
     personality = load_personality(mai_home)
-    persona_text = build_persona_text(cli_path, args.python, mai_home, personality)
+    persona_text = build_persona_text(cli_path, python_exe, mai_home, personality)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "package.json").write_text(
         json.dumps(PACKAGE_JSON, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"

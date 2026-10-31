@@ -133,7 +133,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--db", help="DSH 记忆库路径，默认找工作区的 .dsh-meow/memory.db")
     parser.add_argument("--state", default=str(DEFAULT_STATE), help="同步水位文件")
     parser.add_argument("--home", help="MaiBot 目录（透传给 maimai.py）")
-    parser.add_argument("--base-url", default=maimai.DEFAULT_WEBUI, help="麦麦 WebUI 地址")
+    parser.add_argument("--base-url", default="", help="麦麦 WebUI 地址（默认从 bot_config.toml 读端口）")
     parser.add_argument("--since-hours", type=float, default=24.0, help="回看多少小时，默认 24")
     parser.add_argument("--limit", type=int, default=8, help="最多同步几条，默认 8")
     parser.add_argument("--dry-run", action="store_true", help="只打印不写入")
@@ -165,6 +165,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     home = maimai.resolve_home(args.home)
+    args.base_url = maimai.read_webui_url(home, args.base_url)
     code = maimai.write_memory(
         home,
         args.base_url,

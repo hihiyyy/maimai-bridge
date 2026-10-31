@@ -185,10 +185,52 @@ function probePort(port, host = '127.0.0.1', timeoutMs = 1200) {
   })
 }
 
+/**
+ * 从 bot_config.toml 的 [http] 段读 WebUI 端口。
+ * 端口用户可能改过，别写死；读不出来才退到麦麦的默认值 8001。
+ */
+function webuiPort(maibotHome) {
+  const fallback = 8001
+  if (!maibotHome) return fallback
+  try {
+    const text = readFileSync(join(maibotHome, 'config', 'bot_config.toml'), 'utf8')
+    let inHttp = false
+    for (const raw of text.split(/\r?\n/)) {
+      const line = raw.trim()
+      if (line.startsWith('[')) {
+        inHttp = line === '[http]'
+        continue
+      }
+      if (!inHttp) continue
+      const match = line.match(/^port\s*=\s*(\d+)/)
+      if (match) {
+        const port = Number(match[1])
+        if (port > 0) return port
+      }
+    }
+  } catch {
+    // 配置没读到就用默认端口
+  }
+  return fallback
+}
+
 // ---------------------------------------------------------------- MaiBot 插件配置
 // 只做「按行改值」，保留注释与顺序，避免整份 TOML 重写把用户的注释吃掉。
 
+/** 插件源码目录名（`<MaiBot>/plugins/<这里>`）。 */
 const PLUGIN_ID = 'maimai_bridge'
+
+/**
+ * 插件数据目录名 —— 注意和源码目录**不一样**。
+ * 源码目录是 `maimai_bridge`，而可写数据在 `data/plugins/lirick.maimai-bridge/`
+ * （插件 id 那一套命名），两者别混。
+ */
+const PLUGIN_DATA_ID = 'lirick.maimai-bridge'
+
+/** 插件自己的可写数据目录。 */
+function pluginDataDir(maibotHome) {
+  return join(maibotHome, 'data', 'plugins', PLUGIN_DATA_ID)
+}
 
 /** [plugin] 段可写字段：键名 → 期望类型。值按行替换，缺失则追加到 [plugin] 之后。 */
 const PLUGIN_KEYS = {
@@ -406,7 +448,7 @@ function requireHome(settings) {
 
 /** 插件按天写的记账文件（点赞/收藏都记在这里）。 */
 function tasteStatePath(maibotHome) {
-  return join(maibotHome, 'data', 'plugins', PLUGIN_ID, 'taste.json')
+  return join(pluginDataDir(maibotHome), 'taste.json')
 }
 
 /** 本地日期。不能用 toISOString()，那是 UTC，会跟插件的 strftime 差 8 小时。 */
@@ -442,7 +484,7 @@ function readTasteState(maibotHome) {
 
 /** 出门记录：今天出去几次、有没有在等回、通行证还剩多久、自动叫醒叫过几次。 */
 function readOutingState(maibotHome) {
-  const file = join(maibotHome, 'data', 'plugins', PLUGIN_ID, 'outing.json')
+  const file = join(pluginDataDir(maibotHome), 'outing.json')
   let data = {}
   try {
     data = JSON.parse(readFileSync(file, 'utf8'))
@@ -471,7 +513,7 @@ function readOutingState(maibotHome) {
 
 /** 代发记录：今天替她说了几句、最近几条是什么。 */
 function readRelayState(maibotHome) {
-  const file = join(maibotHome, 'data', 'plugins', PLUGIN_ID, 'relay.json')
+  const file = join(pluginDataDir(maibotHome), 'relay.json')
   let data = {}
   try {
     data = JSON.parse(readFileSync(file, 'utf8'))
@@ -492,7 +534,7 @@ function readRelayState(maibotHome) {
 // ---------------------------------------------------------------- B站登录态
 
 function biliCredentialPath(maibotHome) {
-  return join(maibotHome, 'data', 'plugins', 'maibot.bilibili-browser', 'bili_credential.json')
+  return join(pluginDataDir(maibotHome), 'bili_credential.json')
 }
 
 function readBiliCredential(maibotHome) {
@@ -600,7 +642,7 @@ const LOGIN_SITES = [
 
 /** 登录信息实际存放的位置（插件自己读的那一份）。 */
 function loginsPath(maibotHome) {
-  return join(maibotHome, 'plugins', PLUGIN_ID, 'logins.json')
+  return join(pluginDataDir(maibotHome), 'logins.json')
 }
 
 /** 读回各平台已保存的 cookie。 */
@@ -654,7 +696,7 @@ async function route(req, res) {
 
   if (action === 'status' && req.method === 'GET') {
     const settings = loadSettings()
-    const maibotOnline = await probePort(8001)
+    const maibotOnline = await probePort(webuiPort(settings.maibotHome))
     const pluginConfig = readPluginConfig(settings.maibotHome)
     sendJson(res, 200, {
       ok: true,
@@ -662,6 +704,7 @@ async function route(req, res) {
       resolved: settings,
       maibotVersion: projectVersion(settings.maibotHome),
       maibotOnline,
+      webuiPort: webuiPort(settings.maibotHome),
       memory: memoryInfo(settings.maibotHome),
       plugin: pluginInfo(settings.maibotHome),
       pluginConfig: {
