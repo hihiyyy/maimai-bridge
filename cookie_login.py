@@ -5,10 +5,13 @@ B站 会额外写一份给「刷B站」插件用的 bili_credential.json（读�
 
 用法：
     python cookie_login.py --site bilibili --maibot <MaiBot 目录>
-    python cookie_login.py --site tieba --timeout 300
+    python cookie_login.py --site xhs --timeout 300 --debug
 
-判断「登录成功」的方式统一是看 Cookie 里有没有该站的登录标志键——这比猜页面
-DOM 稳，因为各站改版改不到自己的登录凭证上。
+为什么要验证：光看 Cookie 里有没有登录标志键不够——小红书这类站**没登录也会种
+`web_session`**，于是「浏览器刚打开就说登录成功」。所以这里加了两层：
+
+1. `VERIFY`：能用「我是谁」接口的站，直接带着 Cookie 去问一次，真的登录了才认。
+2. 没接口的站（小红书 / 豆瓣）：对比刚打开时的 Cookie 基线，标志键的值**变了**才算。
 """
 
 import argparse
@@ -20,7 +23,7 @@ from playwright.sync_api import sync_playwright
 
 DEFAULT_MAIBOT = r"C:\Users\lirick\AppData\Roaming\MaiBotOneKeyDesktop\d3c27d5c70b9\modules\MaiBot"
 
-#: 每个平台：怎么打开、认哪个域名、看到哪个 cookie 就算登录成功。
+#: 每个平台：怎么打开、认哪个域名、看到哪个 cookie 才算「可能登录了」。
 SITES = {
     "bilibili": {
         "label": "B站",
@@ -78,6 +81,45 @@ SITES = {
     },
 }
 
+#: 各平台的「我是谁」验证：(地址, 类型, 判断函数)。没有的走 Cookie 基线对比。
+VERIFY = {
+    "bilibili": (
+        "https://api.bilibili.com/x/web-interface/nav",
+        "json",
+        lambda d: bool((d.get("data") or {}).get("isLogin")),
+    ),
+    "tieba": (
+        "https://tieba.baidu.com/dc/common/tbs",
+        "json",
+        lambda d: d.get("is_login") == 1,
+    ),
+    "zhihu": (
+        "https://www.zhihu.com/api/v4/me",
+        "json",
+        lambda d: bool(d.get("id")),
+    ),
+    "weibo": (
+        "https://weibo.com/ajax/profile/info",
+        "json",
+        lambda d: d.get("code") == 100000,
+    ),
+    "github": (
+        "https://api.github.com/user",
+        "json",
+        lambda d: bool(d.get("login")),
+    ),
+    "xiaoheihe": (
+        "https://api.xiaoheihe.cn/account/get_user_info/",
+        "json",
+        lambda d: d.get("status") == "ok",
+    ),
+    "steam": (
+        "https://store.steampowered.com/account/",
+        "text",
+        lambda t: "account_name" in t,
+    ),
+}
+
 
 def matching(cookies, domains):
     """只留这些域名下的 cookie。"""
@@ -90,12 +132,49 @@ def matching(cookies, domains):
     return picked
 
 
+def verify_login(ctx, site_key, debug=False):
+    """带着当前 Cookie 去问一次「我是谁」。返回 True / False / None（问不出来）。"""
+
+    spec = VERIFY.get(site_key)
+    if not spec:
+        return None
+    url, kind, check = spec
+    try:
+        resp = ctx.request.get(url, timeout=15000)
+    except Exception as exc:  # noqa: BLE001
+        if debug:
+            print(f"  [verify] {url} 请求失败：{type(exc).__name__}", flush=True)
+        return None
+    if kind == "json":
+        try:
+            data = resp.json()
+        except Exception:  # noqa: BLE001
+            if debug:
+                print(f"  [verify] {url} 返回的不是 JSON（{resp.status}）", flush=True)
+            return False
+        try:
+            ok = bool(check(data))
+        except Exception:  # noqa: BLE001
+            ok = False
+        if debug:
+            print(f"  [verify] {url} -> {ok}（{str(data)[:120]}）", flush=True)
+        return ok
+    try:
+        ok = bool(check(resp.text() or ""))
+    except Exception:  # noqa: BLE001
+        ok = False
+    if debug:
+        print(f"  [verify] {url} -> {ok}", flush=True)
+    return ok
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--site", default="bilibili", choices=sorted(SITES.keys()))
     ap.add_argument("--maibot", default=DEFAULT_MAIBOT)
     ap.add_argument("--timeout", type=int, default=240)
     ap.add_argument("--channel", default="msedge")
+    ap.add_argument("--debug", action="store_true", help="打印每轮 cookie 名和验证结果")
     args = ap.parse_args()
 
     site = SITES[args.site]
@@ -125,22 +204,48 @@ def main() -> None:
 
         print(
             f"请在这个浏览器窗口里登录 {label}（最多等 {args.timeout} 秒）。"
-            "登录成功后会自动保存，然后窗口自己关。",
+            f"**看到自己的头像或昵称再等两秒**，脚本会自己发现并保存，然后关窗口。",
             flush=True,
         )
 
         deadline = time.time() + args.timeout
-        found = []
+        baseline = None
+        round_no = 0
         while time.time() < deadline:
+            round_no += 1
             try:
                 current = ctx.cookies()
             except Exception:  # noqa: BLE001
                 current = []
             picked = matching(current, site["domains"])
-            names = {c.get("name") for c in picked}
-            if any(marker in names for marker in site["markers"]):
-                cookies = picked
-                break
+            jar_now = {c.get("name"): c.get("value") for c in picked if c.get("name")}
+
+            if baseline is None:
+                baseline = dict(jar_now)
+                if args.debug:
+                    print(f"  [基线] {sorted(baseline)}", flush=True)
+
+            present = [m for m in site["markers"] if m in jar_now]
+            if present:
+                if args.debug:
+                    print(f"  第 {round_no} 轮：看到 {present}，开始验证", flush=True)
+                verdict = verify_login(ctx, args.site, debug=args.debug)
+                if verdict is True:
+                    cookies = picked
+                    break
+                if verdict is None:
+                    # 没有验证接口（小红书 / 豆瓣）：要求标志键的值相对打开时变过
+                    changed = [m for m in present if jar_now.get(m) != baseline.get(m)]
+                    if changed:
+                        cookies = picked
+                        print(f"  （{label} 没有验证接口，靠 Cookie 变化判定：{changed}）", flush=True)
+                        break
+                    if args.debug:
+                        print(f"  第 {round_no} 轮：Cookie 还在，但值跟刚打开时一模一样，应该还没登录", flush=True)
+                elif args.debug:
+                    print(f"  第 {round_no} 轮：验证没通过，继续等", flush=True)
+            elif args.debug and round_no % 5 == 0:
+                print(f"  第 {round_no} 轮：还没有登录标志 cookie（现有 {len(jar_now)} 条）", flush=True)
             time.sleep(3)
 
         if cookies is None:

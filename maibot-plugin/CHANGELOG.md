@@ -1,5 +1,40 @@
 # 更新日志
 
+## 1.1.0 · 按官方结构重构（配置全部可改，行为不变）
+
+功能一个没少，改的是「里面怎么放」。之前所有东西挤在一个 2800 行的 `plugin.py` 里，
+现在拆成四块，硬编码全部下沉成配置。
+
+**主要功能**
+
+- **目录结构按官方规范重排**：`config.py`（全部配置模型）/ `constants.py`（内置默认值与解析）/
+  `sites.py`（站点知识表）/ `plugin.py`（只剩插件类与业务流程）/ `__init__.py`，另加
+  `docs/architecture.md`（模块划分与数据流）和 `AGENTS.md`（给 AI 协作者的仓库指令）。
+- **消灭硬编码**：User-Agent、反爬判定词、动作红线、社交红线、代发红线、站点选择器原本写死在
+  `plugin.py` 里，现在都在 `constants.py` / `sites.py` 里做默认值，且能在 `config.toml` 里覆盖
+  （`[browse].user_agent`、`[browse].block_markers`、`[actions].redlines`、`[actions].social_block`）。
+  网站改版时用户改配置即可，不用等发版。
+- **`[plugin].enabled` 改名 `allow_dsh`**：`enabled` 是宿主保留键（WebUI 顶部启停 + Runner 激活门禁），
+  插件不该声明它。插件自己的开关现在叫 `allow_dsh`，只管「准不准调 DSH」。
+- **数据目录统一到 `ctx.paths.data_dir`**：`logins.json` / `bili_credential.json` / `outing.json` /
+  `taste.json` / `relay.json` / `browser-profile` 全部落在
+  `data/plugins/lirick.maimai-bridge/`，源码目录保持只读。
+  `on_load` 会自动把老路径 `plugins/maimai_bridge/` 下的数据搬过来，升级不用手动挪。
+- **所有配置项都有中文名**：WebUI 里不再显示英文字段名（70 个字段逐个配了 `label`）。
+
+**细节**
+
+- 修掉数据路径重复拼接的 bug：出门记录、点赞记录、代发记录原本会落到
+  `data/plugins/lirick.maimai-bridge/plugins/maimai_bridge/` 底下多一层，现在平了。
+- `config_version` 升到 `1.3.0`。
+- manifest 补 `display.icon`（lucide `link`），删掉不存在的 `locales_path`。
+- 新增 `.gitignore`：`config.toml`、`data/`、`logins.json`、`bili_credential.json`、
+  `browser-profile/` 一律不进仓库。
+- 删掉那个从来没触发过的 `@EventHandler("outing_reply")`——主程序里
+  `EventType.ON_MESSAGE` 的发射点是注释掉的，它一直是死代码；出门回复本来就由
+  `slash_bridge` 这个 HookHandler 接。
+- 文档同步：README 的目录结构、配置表、登录说明、红线说明全部按新结构重写。
+
 ## 1.0.1
 
 - **新增 `/dshhelp`**：一句话看全——有哪些指令、她那几个开关现在开没开、谁能批准出门、

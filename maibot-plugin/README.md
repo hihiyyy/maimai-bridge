@@ -9,9 +9,10 @@
 
 **QQ交流群：1033542800**
 
-> **这是自用插件，不是打磨过的通用产品。** 只在 Windows + MaiBot 1.3.19 + DSH 桌面版上跑通过，路径是硬编码的，依赖 Playwright + 本机 Edge + 一份 B站登录态，接口跟着 MaiBot 源码走、升级可能被打断，也没有测试和 CI。能自用，但不保证稳定。
+> **这是自用插件，不是打磨过的通用产品。** 只在 Windows + MaiBot 1.3.19 + DSH 桌面版上跑通过，依赖 Playwright + 本机 Edge + 一份 B站登录态，接口跟着 MaiBot 源码走、升级可能被打断，也没有测试和 CI。能自用，但不保证稳定。
 >
-> **1.0.0 是「功能齐了」的正式版，不是「打磨好了」的成熟版。**
+> **1.1.0 起按官方结构重排、硬编码全部下沉成配置**（UA / 反爬词 / 动作红线 / 站点选择器都能改），
+> 但功能面和 1.0.x 一样：这次是「里面怎么放」的重构，不是新功能。
 
 ## 它能做什么
 
@@ -49,7 +50,7 @@ B站那边看着挺热闹的，那个实机演示我看了两段，动作比上�
 她能自己动之后，刹车比油门重要：
 
 1. **出门要打招呼** —— 她自己出不去。申请 → 你点头 → 限时通行证 → 到点自动失效并汇报。只认发起会话 + 发起人（或全局管理员）的回复，别人在群里喊「去吧」不算，别的会话说也不算；申请 15 分钟没回自动作废。
-2. **动作白名单** —— `page_act` 只许六种动作。另有两条**写死的红线**（配置文件改不了）：碰「付款 / 下单 / 改密码 / 注销账号」这类，和「发评论 / 发私信 / @所有人」这类，直接拒绝并说明碰到第几步。
+2. **动作白名单** —— `page_act` 只许六种动作。另有两条红线：碰「付款 / 下单 / 改密码 / 注销账号」这类，和「发评论 / 发私信 / @所有人」这类，直接拒绝并说明碰到第几步。这两组词**可以在配置里加**（`[actions].redlines` / `[actions].social_block`），但加进去只会更严、不会更松——内置的那批永远生效。
 3. **代发要过审** —— DSH 想借她的嘴，只能声明台词，插件逐条查红线、字数、@所有人、每日额度。
 
 ## 安装
@@ -58,15 +59,25 @@ B站那边看着挺热闹的，那个实机演示我看了两段，动作比上�
 
 ```
 <MaiBot>/plugins/maimai_bridge/
-├── plugin.py
+├── plugin.py            # 插件类、工具、命令、Hook
+├── config.py            # 配置模型（Runner 据此生成 config.toml）
+├── constants.py         # 内置默认值 + 解析
+├── sites.py             # 站点知识表
 ├── _manifest.json
-├── config.toml
+├── __init__.py
+├── docs/architecture.md # 模块划分与数据流（给改代码的人看）
+├── AGENTS.md            # 给 AI 协作者的仓库指令
 ├── README.md
 ├── CHANGELOG.md
-└── bili_video/           # 看视频与点赞收藏的内置子包
+└── bili_video/          # 看视频与点赞收藏的内置子包
 ```
 
-重启 MaiBot，日志里出现 `[maimai_bridge] 桥插件已加载` 就成了。
+`config.toml` 不进仓库——它由 Runner 首次加载时按 `config.py` 自动生成在插件目录下。
+可写数据（cookie、出门记录、浏览器 profile）全部落在 `ctx.paths.data_dir`，
+不在源码目录里。
+
+装好后在 WebUI「插件管理」里点一次重新加载即可（改的是 Python 代码时点重新加载，
+改的是 SDK 或依赖包时得重启 MaiBot）。日志里出现 `[maimai_bridge] 桥插件已加载` 就成了。
 
 ## 命令
 
@@ -95,23 +106,33 @@ B站那边看着挺热闹的，那个实机演示我看了两段，动作比上�
 | `end_outing` | 提前结束出门并汇报 |
 | `outing_status` | 现在能不能出去 |
 
-另有一个消息事件 `outing_reply`：监听你对出门申请的回复（「去吧」/「算了」）。
+另有一个 HookHandler `slash_bridge`，挂在 `chat.receive.after_process` 上：
+它负责两件事——①兜底识别 `/看` `/看视频` `/dshhelp`（`@Command` 层万一没接住时自己分发）；
+②监听你对出门申请的回复（「去吧」/「算了」）。
+
+> `@Command` 打头的消息如果被兜底接住，会 `abort` 掉这条消息的后续处理，
+> 不会再进「读空气」，所以不会出现一条命令被回两遍的情况。
 
 ## 配置
 
-`config.toml` 七段，DSH 设置页读写的是同一份文件，两边天然同步：
+`config.toml` 七段，DSH 设置页读写的是同一份文件，两边天然同步。
+所有字段都有中文名（`json_schema_extra={"label": ...}`），WebUI 里看到的是中文标签。
 
 | 段 | 关键项 |
 |---|---|
-| `[plugin]` | `enabled`、`recall_limit`、`allow_memory_write`、`dsh_command` / `dsh_profile` / `dsh_timeout_seconds`、`speak_model`、**`admin_qq`**（全局管理员，可填多个） |
-| `[browse]` | `enabled`、`browser_channel`（默认 msedge）、`headless`、`timeout_seconds`、`max_per_hour`、`use_profile`（持久登录态）、`profile_dir` |
-| `[actions]` | `enabled`、`allowed`、`max_steps`、`step_wait_ms` |
-| `[video]` | `enabled`、`desc_max_chars`、`danmaku_limit`、`comment_limit`、`credential_file` |
+| `[plugin]` | **`allow_dsh`**（准不准许调 DSH；插件的总开关 `enabled` 是宿主保留键，不在这一节）、`recall_limit`、`allow_memory_write`、`dsh_command` / `dsh_profile` / `dsh_timeout_seconds`、`speak_model`、**`admin_qq`**（全局管理员，可填多个） |
+| `[browse]` | `enabled`、`browser_channel`（默认 msedge）、`headless`、`timeout_seconds`、`max_per_hour`、`use_profile`（持久登录态）、`profile_dir`、`user_agent`、`block_markers`（反爬判定词） |
+| `[actions]` | `enabled`、`allowed`（六种动作白名单）、`max_steps`、`step_wait_ms`、`redlines`（额外红线词）、`social_block`（禁开的嘴：评论/私信/@所有人） |
+| `[video]` | `enabled`、`desc_max_chars`、`danmaku_limit`、`comment_limit`、`credential_file`、`sessdata` / `bili_jct` / `proxy` |
 | `[taste]` | `enabled`、`auto_like`、`auto_fav`、`fav_folder`、`daily_limit`、`cooldown_seconds`、`require_reason`、`dry_run` |
 | `[outing]` | `enabled`、`owner_ids`、`default_minutes`、`max_minutes`、`daily_limit`、`approve_words`、`deny_words`、`auto_enabled`、`auto_windows`、`auto_daily_limit`、`auto_cooldown_minutes`、`auto_stream_id`、`auto_intent` |
 | `[relay]` | `enabled`、`daily_limit`、`max_chars` |
 
-`admin_qq` 和 `auto_stream_id` 在设置页里是「一格一个、点 + 加一行」的输入框，可以填多个。
+`admin_qq`、`owner_ids`、`allowed`、`redlines`、`social_block`、`block_markers`、`auto_windows`
+在设置页里是「一格一个、点 + 加一行」的输入框，可以填多个；`config.toml` 里写逗号分隔的字符串。
+
+`[actions].redlines` / `[actions].social_block` / `[browse].block_markers` / `[browse].user_agent`
+留空就用内置默认值——默认值在 `constants.py` 里，改默认值不用动 `plugin.py`。
 
 ## 登录
 
@@ -121,11 +142,17 @@ B 站要登录才读得到字幕：
 python cookie_login.py --site bilibili --maibot "<MaiBot 目录>"
 ```
 
-会弹一个真浏览器窗口，扫码成功自动写 `plugins/maimai_bridge/logins.json`，并额外写一份 `data/plugins/maibot.bilibili-browser/bili_credential.json` 给「刷B站」插件。
+会弹一个真浏览器窗口，扫码成功自动写 `data/plugins/lirick.maimai-bridge/logins.json`，
+并额外写一份 `data/plugins/maibot.bilibili-browser/bili_credential.json` 给「刷B站」插件。
 
 其他八个平台（贴吧 / 小黑盒 / Steam / 知乎 / 微博 / 豆瓣 / 小红书 / GitHub）同样一条命令，`--site` 换名字就行；DSH 设置页里每个平台右侧也有「扫码登录」按钮。
 
-判断登录成功看的是 Cookie 里的登录标志键（B站 `SESSDATA`、贴吧 `BDUSS`、知乎 `z_c0`…），不看页面长什么样。所有平台共用 `plugins/maimai_bridge/browser-profile`，登录态留着，`look_around` 走出去也带着。
+判断登录成功是**两层**：Cookie 里的登录标志键出现（B站 `SESSDATA`、贴吧 `BDUSS`、知乎 `z_c0`…），
+**并且**真拿这份 Cookie 去问一次该平台的「我是谁」接口，接口认了才算成功——
+所以不会出现「浏览器刚打开就显示登录成功」这种假阳性。
+小红书和豆瓣没有可用的「我是谁」接口，退回看 Cookie 值相对刚打开时有没有变过。
+
+所有平台共用 `data/plugins/lirick.maimai-bridge/browser-profile`，登录态留着，`look_around` 走出去也带着。
 
 ## 和 DSH 的关系
 

@@ -1,0 +1,30 @@
+# 运行时生成、不进仓库
+/config.toml
+/data/
+/logins.json
+/bili_credential.json
+/browser-profile/
+/models/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+# 备份
+*.bak
+*.bak-*
+*.orig
+*.rej

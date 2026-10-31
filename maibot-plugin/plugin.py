@@ -14,6 +14,7 @@ import json
 import os
 import random
 import re
+import shutil
 import sys
 import time
 import uuid
@@ -21,8 +22,23 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from maibot_sdk import API, Command, EventHandler, Field, MaiBotPlugin, PluginConfigBase, Tool
-from maibot_sdk.types import EventType, ToolParameterInfo, ToolParamType
+from maibot_sdk import (
+    API,
+    Command,
+    EventHandler,
+    Field,
+    HookHandler,
+    MaiBotPlugin,
+    PluginConfigBase,
+    Tool,
+)
+from maibot_sdk.types import (
+    EventType,
+    HookMode,
+    HookOrder,
+    ToolParameterInfo,
+    ToolParamType,
+)
 
 #: 插件目录。扩展插件跑在独立的 runner 进程里，未必有包上下文，
 #: 所以把目录本身塞进 sys.path，让 `bili_video` 能作为顶层包被导入。
@@ -51,387 +67,35 @@ except Exception as _video_exc:  # noqa: BLE001
     _VIDEO_IMPORT_ERROR = f"{type(_video_exc).__name__}: {_video_exc}"
 
 
-class BridgeCoreConfig(PluginConfigBase):
-    """桥的核心配置。"""
-
-    __ui_label__ = "桥接"
-    __ui_icon__ = "link"
-    __ui_order__ = 0
-
-    config_version: str = Field(default="1.2.0", description="配置版本")
-
-    # —— 谁说了算 ——
-    admin_qq: str = Field(
-        default="",
-        description="全局管理员 QQ 号，逗号分隔多个。填了之后，批准出门这类「得主人点头」的事只认这些人；留空就是谁发起申请等谁回",
-    )
-
-    # —— 总开关 ——
-    enabled: bool = Field(default=True, description="是否启用桥接功能（关闭后 dsh_task 不可用）")
-
-    # —— 记忆互通 ——
-    recall_limit: int = Field(default=5, description="maimai_recall 默认返回条数（1-20）")
-    allow_memory_write: bool = Field(
-        default=True,
-        description="是否允许通过 maimai_remember 让麦麦写入长期记忆",
-    )
-
-    # —— 双向互联：调 DSH ——
-    dsh_command: str = Field(default="dsh", description="DSH 可执行文件（或完整路径）")
-    dsh_profile: str = Field(default="headless", description="调用 DSH 时使用的 profile")
-    dsh_timeout_seconds: int = Field(default=240, description="单次 DSH 任务最长等待秒数")
-    dsh_cwd: str = Field(default="", description="DSH 子进程的工作目录（留空则继承 MaiBot 的）")
-    dsh_extra_args: str = Field(
-        default="",
-        description="追加给 dsh 的参数，按空格拆开（例如 --session-id <id> 续用同一会话）",
-    )
-
-    # —— 双向互联：让麦麦说话 ——
-    speak_model: str = Field(default="", description="maimai_speak 使用的模型名（留空用宿主默认）")
-
-
-class BridgeBrowseConfig(PluginConfigBase):
-    """「出去看看」的配置：无头浏览器。"""
-
-    __ui_label__ = "出去看看"
-    __ui_icon__ = "compass"
-    __ui_order__ = 10
-
-    enabled: bool = Field(default=True, description="是否允许麦麦自己用浏览器出去看（关掉后 look_around 不可用）")
-    browser_channel: str = Field(
-        default="msedge",
-        description="浏览器通道：msedge（系统 Edge）/ chrome / 留空改用 playwright 自带 chromium",
-    )
-    headless: bool = Field(default=True, description="是否无头运行（关掉会弹窗口，会占你的屏）")
-    timeout_seconds: int = Field(default=45, description="打开页面最长等待秒数")
-    max_chars: int = Field(default=1200, description="返回给麦麦的正文最多多少字")
-    wait_after_load_ms: int = Field(default=1200, description="页面加载后再等多久（毫秒），给动态内容一点时间")
-    cooldown_seconds: int = Field(default=20, description="两次 look_around 之间至少间隔多少秒（防止她连刷）")
-    max_per_hour: int = Field(default=12, description="每小时最多出去看几次（0 表示不限制）")
-    use_profile: bool = Field(
-        default=True,
-        description="是否用持久浏览器 profile（和扫码登录共用同一份 cookie，登录过的站进来就是登录态）",
-    )
-    profile_dir: str = Field(
-        default="",
-        description="持久 profile 目录，留空用插件目录下的 browser-profile",
-    )
-
-
-class BridgeVideoConfig(PluginConfigBase):
-    """「看视频」的配置：走 B站 接口，读字幕 / 简介 / 弹幕 / 热评。"""
-
-    __ui_label__ = "看视频"
-    __ui_icon__ = "play-circle"
-    __ui_order__ = 20
-
-    enabled: bool = Field(default=True, description="是否允许看视频（关掉后 watch_video 不可用）")
-    sessdata: str = Field(
-        default="",
-        description="B站 SESSDATA（填了才读得到字幕；留空则读凭证文件 bili_credential.json）",
-    )
-    bili_jct: str = Field(default="", description="B站 bili_jct（可选，留空则读凭证文件）")
-    user_agent: str = Field(default="", description="自定义 UA（留空用内置的桌面 Edge UA）")
-    credential_file: str = Field(
-        default="",
-        description="凭证文件相对路径（相对插件 data 目录），留空用 bili_credential.json",
-    )
-    subtitle: bool = Field(default=True, description="是否读字幕（这是「真的看懂视频」的关键）")
-    subtitle_max_chars: int = Field(default=3000, description="字幕最多取多少字")
-    desc_max_chars: int = Field(default=500, description="简介最多取多少字")
-    comment_limit: int = Field(default=12, description="热门评论取几条")
-    danmaku: bool = Field(default=True, description="是否抽样弹幕")
-    danmaku_limit: int = Field(default=40, description="弹幕抽样几条")
-    related_limit: int = Field(default=4, description="相关推荐取几条")
-    proxy: str = Field(default="", description="代理地址，如 http://127.0.0.1:7890（留空直连）")
-    timeout_seconds: int = Field(default=20, description="单次接口请求超时秒数")
-
-
-class BridgeTasteConfig(PluginConfigBase):
-    """「喜欢就自己动手」的配置：看完一个东西觉得好，自己点赞 / 收藏。"""
-
-    __ui_label__ = "喜欢就自己动手"
-    __ui_icon__ = "heart"
-    __ui_order__ = 30
-
-    enabled: bool = Field(default=True, description="是否允许她自己点赞 / 收藏（关掉后只会嘴上说喜欢，不动手）")
-    auto_like: bool = Field(default=True, description="遇到喜欢的能不能自己点赞")
-    auto_fav: bool = Field(default=True, description="遇到特别喜欢的能不能自己收藏")
-    fav_folder: str = Field(
-        default="",
-        description="收藏到哪个收藏夹（留空 = 默认收藏夹；填名字或 id 都行）",
-    )
-    daily_limit: int = Field(default=10, description="每天最多自己动手几次（0 表示不限制）")
-    cooldown_seconds: int = Field(default=300, description="两次动手之间至少隔多少秒（防止一激动连点一串）")
-    require_reason: bool = Field(
-        default=True,
-        description="是否必须说明「为什么喜欢」。开着能挡住没头没脑的乱点，她也更容易记住自己喜欢什么",
-    )
-    dry_run: bool = Field(
-        default=False,
-        description="试运行：只在日志和返回里说「我本来想赞这个」，不真的发出去",
-    )
-
-
-class BridgeActionsConfig(PluginConfigBase):
-    """「动手」的配置：允许她在页面上做哪些动作，做到哪一步为止。"""
-
-    __ui_label__ = "动手"
-    __ui_icon__ = "mouse-pointer-click"
-    __ui_order__ = 15
-
-    enabled: bool = Field(default=True, description="是否允许她在页面上动手（点、填、翻页、滚动）")
-    allowed: str = Field(
-        default="read,click,type,scroll,press,back",
-        description="允许的动作，逗号分隔。可选：read / click / type / scroll / press / back。想收紧就删几个",
-    )
-    max_steps: int = Field(default=6, description="一次请求最多做几步（防止她一路点下去停不下来）")
-    step_wait_ms: int = Field(default=800, description="每步之后等多久（毫秒），给页面一点反应时间")
-    timeout_seconds: int = Field(default=20, description="单步最长等待秒数")
-
-
-class BridgeOutingConfig(PluginConfigBase):
-    """「出门要打招呼」的配置：她想去远处看看，先问一声，批了才去，到点回来。"""
-
-    __ui_label__ = "出门要打招呼"
-    __ui_icon__ = "key-round"
-    __ui_order__ = 35
-
-    enabled: bool = Field(default=True, description="是否启用「先申请再出去」这套流程")
-    owner_ids: str = Field(
-        default="",
-        description="能批准的人（QQ 号，逗号分隔）。留空 = 谁发起申请就等谁回，也就是「问谁等谁」",
-    )
-    default_minutes: int = Field(default=30, description="申请时不说话，默认批多少分钟")
-    max_minutes: int = Field(default=120, description="一次最多能批多少分钟（超过按这个算）")
-    daily_limit: int = Field(default=3, description="每天最多能出去几次（0 表示不限制）")
-    approve_words: str = Field(
-        default="可以,去吧,同意,准了,行,好,批准,ok,OK,嗯,去吧喵",
-        description="主人回哪些词算批准（逗号分隔，含其中一个就算）",
-    )
-    deny_words: str = Field(
-        default="不行,不许,别去,不准,拒绝,不去,no,NO,算了吧",
-        description="主人回哪些词算拒绝（先查拒绝再查批准）",
-    )
-    report_on_end: bool = Field(default=True, description="回来时是否主动汇报一句她看到了什么")
-    report_max_chars: int = Field(default=600, description="回来汇报最多多少字")
-
-    # —— 自己想起来（第 3 期）——
-    auto_enabled: bool = Field(
-        default=False,
-        description="是否让她自己想起来出去：定时叫醒她，由她决定要不要申请。默认关，开了才会动",
-    )
-    auto_stream_id: str = Field(
-        default="",
-        description="在哪个群叫她。留空 = 用她自己记下的「最近说过话的群」（第一次在群里说话就自动记下来，不用填）",
-    )
-    auto_windows: str = Field(
-        default="12:00-14:00,18:00-23:00",
-        description="什么时段可以叫她（逗号分隔，跨夜写成 18:00-09:00 也行）",
-    )
-    auto_daily_limit: int = Field(default=2, description="每天最多叫醒几次（0 表示不限制）")
-    auto_cooldown_minutes: int = Field(
-        default=180, description="两次叫醒之间至少隔多少分钟"
-    )
-    auto_intent: str = Field(
-        default="", description="叫醒她时说的那句话，留空用默认文案"
-    )
-
-
-class BridgeRelayConfig(PluginConfigBase):
-    """「替她说一句」：DSH 没有发送权，只有写台词权。
-
-    DSH 在答复里写 ``[[speak]]台词[[/speak]]``，这里负责把关——
-    多长、说不说、发不发，都在这儿定；它自己没法直接往群里发东西。
-    """
-
-    __ui_label__ = "替她说一句"
-    __ui_icon__ = "send"
-    __ui_order__ = 40
-
-    enabled: bool = Field(
-        default=True, description="允许 DSH 用 [[speak]]…[[/speak]] 借她的嘴说话"
-    )
-    daily_limit: int = Field(default=5, description="每天最多替她说几句（0 = 不限制）")
-    max_chars: int = Field(default=200, description="一句最多多少字")
-
-
-class MaiMaiBridgeConfig(PluginConfigBase):
-    """桥插件配置。"""
-
-    plugin: BridgeCoreConfig = Field(default_factory=BridgeCoreConfig)
-    browse: BridgeBrowseConfig = Field(default_factory=BridgeBrowseConfig)
-    actions: BridgeActionsConfig = Field(default_factory=BridgeActionsConfig)
-    outing: BridgeOutingConfig = Field(default_factory=BridgeOutingConfig)
-    video: BridgeVideoConfig = Field(default_factory=BridgeVideoConfig)
-    taste: BridgeTasteConfig = Field(default_factory=BridgeTasteConfig)
-    relay: BridgeRelayConfig = Field(default_factory=BridgeRelayConfig)
-
-
-# 站点简写 → 搜索页模板。{q} 会被替换成 URL 编码后的关键词。
-SITE_TEMPLATES: Dict[str, str] = {
-    "bilibili": "https://search.bilibili.com/all?keyword={q}",
-    "b站": "https://search.bilibili.com/all?keyword={q}",
-    "bili": "https://search.bilibili.com/all?keyword={q}",
-    "贴吧": "https://tieba.baidu.com/f/search/res?qw={q}",
-    "tieba": "https://tieba.baidu.com/f/search/res?qw={q}",
-    "小黑盒": "https://www.xiaoheihe.cn/search?q={q}",
-    "xiaoheihe": "https://www.xiaoheihe.cn/search?q={q}",
-    "steam": "https://store.steampowered.com/search/?term={q}",
-    "知乎": "https://www.zhihu.com/search?type=content&q={q}",
-    "zhihu": "https://www.zhihu.com/search?type=content&q={q}",
-    "微博": "https://s.weibo.com/weibo?q={q}",
-    "weibo": "https://s.weibo.com/weibo?q={q}",
-    "豆瓣": "https://www.douban.com/search?q={q}",
-    "douban": "https://www.douban.com/search?q={q}",
-    "小红书": "https://www.xiaohongshu.com/search_result?keyword={q}",
-    "github": "https://github.com/search?q={q}",
-}
-
-# 站点简写 → 首页（关键词为空时用）
-SITE_HOMES: Dict[str, str] = {
-    "bilibili": "https://www.bilibili.com/",
-    "b站": "https://www.bilibili.com/",
-    "bili": "https://www.bilibili.com/",
-    "贴吧": "https://tieba.baidu.com/",
-    "tieba": "https://tieba.baidu.com/",
-    # 小黑盒的 /search 和 /home 都是空壳，只有 bbs 首页真的带内容流
-    "小黑盒": "https://www.xiaoheihe.cn/app/bbs/home",
-    "xiaoheihe": "https://www.xiaoheihe.cn/app/bbs/home",
-    "steam": "https://store.steampowered.com/",
-    "知乎": "https://www.zhihu.com/",
-    "zhihu": "https://www.zhihu.com/",
-    # 微博走手机版：桌面版的 s.weibo.com 搜索要登录，m.weibo.cn 不用
-    "微博": "https://m.weibo.cn/",
-    "weibo": "https://m.weibo.cn/",
-    "豆瓣": "https://www.douban.com/",
-    "douban": "https://www.douban.com/",
-    "小红书": "https://www.xiaohongshu.com/",
-    "github": "https://github.com/",
-}
-
-# 这些站的搜索页对未登录 / 无头访问是死路（验证页或登录墙），只能看首页流。
-# 用户给了关键词时，我们不硬碰搜索页，直接去看首页，并如实说明「只能看首页」。
-SITE_BROWSE_ONLY = {"weibo", "微博", "douban", "豆瓣", "xiaoheihe", "小黑盒"}
-
-# 站点配方：告诉抽取层「一条结果长什么样」。
-# item 是一条结果的选择器；fields 是字段名 → (选择器, 取哪个属性，None 表示取文字)；
-# link 是卡片的链接选择器（空字符串表示卡片本身就是 <a>）。没配方的站点回退到整页正文。
-SITE_RECIPES: Dict[str, Dict[str, Any]] = {
-    "bilibili": {
-        "item": ".bili-video-card",
-        "limit": 8,
-        "fields": {
-            "标题": (".bili-video-card__info--tit", None),
-            "作者": (".bili-video-card__info--author", None),
-            "播放": (".bili-video-card__stats--item", None),
-            "时长": (".bili-video-card__stats__duration", None),
-            "日期": (".bili-video-card__info--date", None),
-        },
-        "link": "a",
-    },
-    "steam": {
-        "item": "#search_resultsRows > a",
-        "limit": 8,
-        "fields": {
-            "标题": (".title", None),
-            "发售": (".search_released", None),
-            "价格": (".discount_final_price", None),
-        },
-        "link": "",
-    },
-    "github": {
-        "item": "div.search-title, .repo-list-item",
-        "limit": 8,
-        "fields": {
-            "条目": (".", None),
-        },
-        "link": "a",
-    },
-    # 微博手机版：首页信息流，天然不用登录
-    "weibo": {
-        "item": "div.card.m-panel",
-        "limit": 8,
-        "wait_for": ".weibo-text",
-        "fields": {
-            "标题": (".weibo-text", None),
-            "发布者": (".m-text-box .m-text-cut", None),
-        },
-        "link": "a[href*='/detail/'], a[href*='/status/']",
-    },
-    # 豆瓣首页：热门话题列表
-    "douban": {
-        "item": "li.rec_topics",
-        "limit": 8,
-        "fields": {
-            "标题": ("a.rec_topics_name", None),
-            "热度": (".rec_topics_subtitle", None),
-        },
-        "link": "a",
-    },
-    # 小黑盒 bbs 首页信息流
-    "xiaoheihe": {
-        "item": "a.hb-cpt__bbs-content",
-        "limit": 8,
-        "fields": {
-            "标题": (".bbs-content__title", None),
-            "正文": (".bbs-content__content", None),
-        },
-        "link": "",
-    },
-}
-
-# 平台规范名：用户在命令里怎么叫都行，内部统一成一个键。
-SITE_CANON: Dict[str, str] = {
-    "bilibili": "bilibili",
-    "b站": "bilibili",
-    "bili": "bilibili",
-    "哔哩哔哩": "bilibili",
-    "贴吧": "tieba",
-    "tieba": "tieba",
-    "百度贴吧": "tieba",
-    "小黑盒": "xiaoheihe",
-    "xiaoheihe": "xiaoheihe",
-    "steam": "steam",
-    "蒸汽": "steam",
-    "知乎": "zhihu",
-    "zhihu": "zhihu",
-    "微博": "weibo",
-    "weibo": "weibo",
-    "豆瓣": "douban",
-    "douban": "douban",
-    "小红书": "xhs",
-    "xhs": "xhs",
-    "xiaohongshu": "xhs",
-    "github": "github",
-    "gh": "github",
-}
-
-# 平台规范名 → 中文显示名
-SITE_LABELS: Dict[str, str] = {
-    "bilibili": "B站",
-    "tieba": "贴吧",
-    "xiaoheihe": "小黑盒",
-    "steam": "Steam",
-    "zhihu": "知乎",
-    "weibo": "微博",
-    "douban": "豆瓣",
-    "xhs": "小红书",
-    "github": "GitHub",
-}
-
-# 平台规范名 → cookie 该挂到哪些域（登录态注入用）
-SITE_DOMAINS: Dict[str, list] = {
-    "bilibili": [".bilibili.com"],
-    "tieba": [".baidu.com"],
-    "xiaoheihe": [".xiaoheihe.cn"],
-    "steam": [".steampowered.com", ".steamcommunity.com"],
-    "zhihu": [".zhihu.com"],
-    "weibo": [".weibo.com", ".weibo.cn"],
-    "douban": [".douban.com"],
-    "xhs": [".xiaohongshu.com"],
-    "github": [".github.com"],
-}
+# ── 插件内部模块 ────────────────────────────────────────────────────────
+# 配置模型 / 站点表 / 内置默认值分别放在 config.py、sites.py、constants.py，
+# 这里只做引用。用相对导入是因为 PluginLoader 加载本文件时给了
+# submodule_search_locations，本文件相当于一个包，这样不会和别的插件撞 config.py。
+from .config import MaiMaiBridgeConfig  # noqa: E402
+from .constants import (  # noqa: E402
+    DEFAULT_ACTION_ORDER,
+    DEFAULT_RELAY_REDLINES,
+    RELAY_HINT,
+    RELAY_MENTIONS,
+    SPEAK_PATTERN,
+    contains_any,
+    extract_speak,
+    resolve_action_redlines,
+    resolve_action_social,
+    resolve_block_markers,
+    resolve_user_agent,
+)
+from .sites import (  # noqa: E402
+    SITE_BROWSE_ONLY,
+    SITE_DOMAINS,
+    SITE_HOMES,
+    SITE_LABELS,
+    SITE_RECIPES,
+    SITE_TEMPLATES,
+    canonical_site,
+    resolve_recipe,
+    split_selector,
+)
 
 LOGIN_FILENAME = "logins.json"
 
@@ -439,24 +103,55 @@ LOGIN_FILENAME = "logins.json"
 def _canonical_site(raw: str) -> str:
     """把各种叫法统一成规范平台名；不认识的返回空串。"""
 
-    key = (raw or "").strip().lower()
-    return SITE_CANON.get(key, "")
+    return canonical_site(raw)
 
 
 def _plugin_dir() -> str:
-    """插件自己所在的目录（数据文件都放这儿）。"""
+    """插件源码所在目录（只读资源：bili_video、模板等）。"""
 
-    import os
+    return _PLUGIN_DIR
 
-    return os.path.dirname(os.path.abspath(__file__))
+
+#: 运行时数据目录。由 ``on_load`` 按 ``ctx.paths.data_dir`` 绑定，
+#: 未绑定前回退到插件目录下的 data/（本地离线测试用）。
+#: 原则：**可写的数据一律进这里，源码目录保持只读**。
+_DATA_DIR: Path = Path(_PLUGIN_DIR) / "data"
+
+
+def bind_data_dir(raw: Any = None) -> Path:
+    """绑定运行时数据目录，并把老版本写歪的文件搬过来。
+
+    老版本的 ``_taste_path`` / ``_relay_path`` / ``_outing_path`` 多拼了一层
+    ``plugins/maimai_bridge/``，实际写在 ``data_dir/plugins/maimai_bridge/`` 下；
+    新版本统一放 ``data_dir`` 根下，所以首次加载时顺手搬一次，避免用户丢数据。
+    """
+
+    global _DATA_DIR
+    base = Path(raw) if raw else Path(_PLUGIN_DIR) / "data"
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        base = Path(_PLUGIN_DIR) / "data"
+        base.mkdir(parents=True, exist_ok=True)
+
+    legacy = base / "plugins" / "maimai_bridge"
+    if legacy.is_dir():
+        for item in legacy.iterdir():
+            target = base / item.name
+            if item.is_file() and not target.exists():
+                try:
+                    shutil.move(str(item), str(target))
+                except OSError:
+                    pass
+
+    _DATA_DIR = base
+    return base
 
 
 def _login_path() -> str:
-    """登录信息的存放路径。"""
+    """登录信息的存放路径（运行时数据目录，不进源码仓库）。"""
 
-    import os
-
-    return os.path.join(_plugin_dir(), LOGIN_FILENAME)
+    return str(_DATA_DIR / LOGIN_FILENAME)
 
 
 def _load_logins() -> Dict[str, Dict[str, str]]:
@@ -579,15 +274,7 @@ def _digest(result: Dict[str, Any], limit: int = 12) -> str:
 
 
 # 站点弹出验证时页面上会出现的字样：命中就当成「被挡住了」，不要硬看。
-_BLOCK_MARKERS = (    "百度安全验证",
-    "请完成下方验证",
-    "滑动验证",
-    "安全验证",
-    "验证码",
-    "Just a moment",
-    "Enable JavaScript and cookies",
-    "异常流量",
-)
+_BLOCK_MARKERS = resolve_block_markers("")
 
 
 def _resolve_recipe(site: str, url: str) -> Dict[str, Any]:
@@ -718,47 +405,13 @@ def _resolve_url(site: str, what: str, url: str) -> Tuple[str, str]:
 DEFAULT_ACTION_ORDER = ("read", "click", "type", "scroll", "press", "back")
 
 # 这几件事和钱、账号有关，写死不给改：她可以看，但不能替主人做决定。
-_ACTION_REDLINES = (
-    "付款",
-    "支付",
-    "购买",
-    "下单",
-    "结算",
-    "充值",
-    "退款",
-    "转账",
-    "钱包",
-    "绑定银行卡",
-    "实名认证",
-    "改密码",
-    "修改密码",
-    "注销账号",
-    "注销账户",
-    "解除绑定",
-    "解绑手机",
-    "删除账号",
-)
+_ACTION_REDLINES = resolve_action_redlines("")
 
 # 往外面说话（评论 / 弹幕 / 私信 / 投稿）属于第 4 期「代发」，现在一律拦下。
-_ACTION_SOCIAL = (
-    "发送评论",
-    "发表评论",
-    "发评论",
-    "发弹幕",
-    "发送弹幕",
-    "发私信",
-    "发送私信",
-    "发布视频",
-    "发布动态",
-    "投稿",
-    "转发",
-)
+_ACTION_SOCIAL = resolve_action_social("")
 
 
-DEFAULT_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0"
-)
+DEFAULT_UA = resolve_user_agent("")
 
 
 def _parse_steps(raw: str, limit: int) -> Tuple[list, str]:
@@ -1048,7 +701,10 @@ class MaiMaiBridgePlugin(MaiBotPlugin):
         self._last_stream = ""
 
     async def on_load(self) -> None:
-        """插件加载。"""
+        """插件加载：先绑数据目录（顺手搬老版本的写歪文件），再起自主叫醒循环。"""
+
+        data_dir = bind_data_dir(getattr(getattr(self.ctx, "paths", None), "data_dir", None))
+        self.ctx.logger.info("[maimai_bridge] 数据目录：%s", data_dir)
         self.ctx.logger.info("[maimai_bridge] 桥插件已加载")
         if _VIDEO_IMPORT_ERROR:
             self.ctx.logger.warning(
@@ -1108,15 +764,12 @@ class MaiMaiBridgePlugin(MaiBotPlugin):
         if not getattr(browse, "use_profile", True):
             return ""
         raw = str(getattr(browse, "profile_dir", "") or "").strip()
-        return raw or str(Path(_plugin_dir()) / "browser-profile")
+        return raw or str(_DATA_DIR / "browser-profile")
 
     def _video_data_dir(self) -> Path:
-        """插件自己的数据目录：凭证文件放这儿。"""
+        """插件运行时数据目录（已在 on_load 里绑定，这里直接返回）。"""
 
-        data_dir = getattr(getattr(self.ctx, "paths", None), "data_dir", None)
-        if data_dir is None:
-            data_dir = Path(_PLUGIN_DIR) / "data"
-        return Path(data_dir)
+        return _DATA_DIR
 
     async def _video_client(self) -> Any:
         """惰性建 B站 客户端（复用连接池，插件生命周期内只有一个）。"""
@@ -1212,7 +865,7 @@ class MaiMaiBridgePlugin(MaiBotPlugin):
     def _taste_path(self) -> Path:
         """点赞/收藏的记账文件（按天分账，跨天自动清零）。"""
 
-        return self._video_data_dir() / "plugins" / "maimai_bridge" / "taste.json"
+        return _DATA_DIR / "taste.json"
 
     def _load_taste(self) -> Dict[str, Any]:
         """读今天的账；日期变了就重开一本。"""
@@ -1513,7 +1166,7 @@ class MaiMaiBridgePlugin(MaiBotPlugin):
     # ===== 替她说一句（第 4 期）=====
 
     def _relay_path(self) -> Path:
-        return self._video_data_dir() / "plugins" / "maimai_bridge" / "relay.json"
+        return _DATA_DIR / "relay.json"
 
     def _load_relay(self) -> Dict[str, Any]:
         today = time.strftime("%Y-%m-%d")
@@ -2195,7 +1848,7 @@ class MaiMaiBridgePlugin(MaiBotPlugin):
     def _outing_path(self) -> Path:
         """出门记录存在哪。"""
 
-        return self._video_data_dir() / "plugins" / "maimai_bridge" / "outing.json"
+        return _DATA_DIR / "outing.json"
 
     def _load_outing(self) -> Dict[str, Any]:
         """读出门记录。跨天清零，超时的申请当没问过。"""
@@ -2501,23 +2154,97 @@ class MaiMaiBridgePlugin(MaiBotPlugin):
 
         return None
 
-    @EventHandler(
-        "outing_reply",
-        description="主人回一句「去吧」就放她出门",
-        event_type=EventType.ON_MESSAGE,
+    # ── 命令兜底：命令注册层没接住时自己分发 ──────────────────
+    # 按文档 @Command 的 pattern 会被 component_registry 编译成 compiled_pattern，
+    # 再由 find_command_by_text 匹配。服务器上这三层都验过是对的，命令却始终不触发。
+    # 于是挂在 chat.receive.after_process 上自己认一遍——这个 Hook 是主链里实打实
+    # await 的（bot.py:830），比 ON_MESSAGE 事件可靠（那个调用点被注释掉了）。
+    _SLASH_ROUTES: Tuple[Tuple[str, str], ...] = (
+        (r"^/看视频(?:\s+(?P<rest>.*))?$", "watch_video"),
+        (r"^/看(?:\s+(?P<rest>.*))?$", "look"),
+        (r"^/dshhelp\s*$", "dshhelp"),
     )
-    async def handle_outing_reply(
-        self, message: Any = None, stream_id: str = "", **kwargs: Any
-    ) -> Tuple[bool, bool, Optional[str], None, None]:
-        """监听群里的回复，判断这次出门批不批。"""
 
-        note: Optional[str] = None
-        self._remember_stream(stream_id, kwargs)
-        try:
-            note = await self._check_outing_reply(message, stream_id, dict(kwargs))
-        except Exception as exc:  # noqa: BLE001
-            self.ctx.logger.warning("[maimai_bridge] 出门回复处理失败：%s", exc)
-        return True, True, note, None, None
+    @HookHandler(
+        "chat.receive.after_process",
+        name="slash_bridge",
+        description="兜底：命令注册层没接住时，自己认 /看 /看视频 /dshhelp；顺带接出门回复",
+        mode=HookMode.BLOCKING,
+        order=HookOrder.EARLY,
+    )
+    async def handle_slash_bridge(self, message: Any = None, **kwargs: Any) -> Dict[str, Any]:
+        """命令注册层失效时的兜底分发。
+
+        认出来就自己执行并 abort 掉后续链路，免得她再把这句当闲聊回一遍。
+        非命令消息顺带看一眼是不是在回出门申请——ON_MESSAGE 事件在主链上被注释掉了，
+        只能挂在这个 Hook 上。
+        """
+
+        if not isinstance(message, dict):
+            return {"action": "continue"}
+
+        text = str(message.get("processed_plain_text") or "").strip()
+        current_stream = str(message.get("session_id") or "")
+
+        if not text.startswith("/"):
+            if not text:
+                return {"action": "continue"}
+            # 出门申请的回复：把纯文本塞进 plain_text，_check_outing_reply 才认得
+            probe: Dict[str, Any] = dict(message)
+            probe.setdefault("plain_text", text)
+            try:
+                note = await self._check_outing_reply(probe, current_stream, dict(kwargs))
+            except Exception as exc:  # noqa: BLE001
+                self.ctx.logger.warning("[maimai_bridge] 出门回复处理失败：%s", exc)
+                return {"action": "continue"}
+            if note:
+                self.ctx.logger.info("[maimai_bridge] 出门回复：%s", note)
+                return {"action": "abort"}
+            return {"action": "continue"}
+
+        handlers = {
+            "look": self.command_look,
+            "watch_video": self.command_watch_video,
+            "dshhelp": self.command_dshhelp,
+        }
+        for pattern, action in self._SLASH_ROUTES:
+            matched = re.match(pattern, text)
+            if not matched:
+                continue
+            handler = handlers.get(action)
+            if handler is None:
+                return {"action": "continue"}
+
+            session_id = str(message.get("session_id") or "")
+            group_id = ""
+            user_id = ""
+            message_info = message.get("message_info")
+            if isinstance(message_info, dict):
+                group = message_info.get("group_info")
+                if isinstance(group, dict):
+                    group_id = str(group.get("group_id") or "")
+                user = message_info.get("user_info")
+                if isinstance(user, dict):
+                    user_id = str(user.get("user_id") or "")
+
+            call_kwargs: Dict[str, Any] = {
+                "stream_id": session_id,
+                "matched_groups": matched.groupdict(),
+                "group_id": group_id,
+                "user_id": user_id,
+                "message": message,
+            }
+            try:
+                ok, reply, _ = await handler(**call_kwargs)
+                self.ctx.logger.info(
+                    "[maimai_bridge] 兜底执行 %s：%s（ok=%s）", action, reply, ok
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.ctx.logger.warning("[maimai_bridge] 兜底执行 %s 失败：%s", action, exc)
+            self._remember_stream(session_id, {"group_id": group_id})
+            return {"action": "abort"}
+
+        return {"action": "continue"}
 
     @Tool(
         "ask_permission",
@@ -2699,46 +2426,11 @@ class MaiMaiBridgePlugin(MaiBotPlugin):
 
 
 #: DSH 想借她的嘴说话时，用这对标记把台词圈出来。
-_SPEAK_RE = re.compile(r"\[\[\s*speak\s*\]\](.*?)\[\[\s*/\s*speak\s*\]\]", re.DOTALL)
-
-#: 代发红线：钱和账号的事，DSH 写得再好也不替她说。
-_RELAY_REDLINES: Tuple[str, ...] = (
-    "转账",
-    "汇款",
-    "收款码",
-    "付款",
-    "支付",
-    "密码",
-    "验证码",
-    "银行卡",
-    "身份证",
-    "实名",
-    "借钱",
-    "扫码",
-)
-
-#: 代发红线：不能替她 @ 所有人。
-_RELAY_MENTIONS: Tuple[str, ...] = ("@所有人", "@全体成员", "@all", "@everyone")
-
-#: 交给 DSH 的任务末尾附上这句，它才知道自己有「借嘴说话」这个通道。
-_RELAY_HINT = (
-    "（备注：如果你有话想直接发到群里，用 [[speak]]这句话[[/speak]] 包起来，"
-    "我会替你发出去；不想说就别写。）"
-)
-
-
-def _extract_speak(text: str) -> Tuple[list, str]:
-    """从 DSH 答复里抽出要代发的台词，并把标记从正文里剥掉。
-
-    返回 ``(台词列表, 剥干净的正文)``。为什么要把标记剥掉：这段正文会原样
-    交给麦麦当上下文，留着 ``[[speak]]`` 她可能会照着念出来。
-    """
-
-    raw = text or ""
-    lines = [m.strip() for m in _SPEAK_RE.findall(raw) if m.strip()]
-    cleaned = _SPEAK_RE.sub("", raw)
-    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
-    return lines, cleaned
+_SPEAK_RE = SPEAK_PATTERN
+_RELAY_REDLINES: Tuple[str, ...] = DEFAULT_RELAY_REDLINES
+_RELAY_MENTIONS: Tuple[str, ...] = RELAY_MENTIONS
+_RELAY_HINT = RELAY_HINT
+_extract_speak = extract_speak
 
 
 def _contains_any(text: str, words: str) -> bool:

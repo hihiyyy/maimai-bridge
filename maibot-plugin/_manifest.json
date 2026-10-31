@@ -1,6 +1,7 @@
 {
   "manifest_version": 2,
-  "version": "1.0.1",
+  "id": "lirick.maimai-bridge",
+  "version": "1.1.0",
   "name": "Maibot互联DSH",
   "description": "把 MaiBot 和 DeepSeek Harness 连起来：人格互通、记忆双向、双向调用；能自己出去看网页、真的看 B 站视频、看到喜欢的会自己点赞收藏；出门前会先申请，回来会汇报。",
   "author": {
@@ -13,6 +14,13 @@
     "homepage": "https://github.com/hihiyyy/maimai-bridge",
     "documentation": "https://github.com/hihiyyy/maimai-bridge",
     "issues": "https://github.com/hihiyyy/maimai-bridge/issues"
+  },
+  "display": {
+    "icon": {
+      "type": "lucide",
+      "value": "link",
+      "fallback": "plug"
+    }
   },
   "changelog": "CHANGELOG.md",
   "host_application": {
@@ -33,10 +41,8 @@
   ],
   "i18n": {
     "default_locale": "zh-CN",
-    "locales_path": "_locales",
     "supported_locales": [
       "zh-CN"
     ]
-  },
-  "id": "lirick.maimai-bridge"
+  }
 }
