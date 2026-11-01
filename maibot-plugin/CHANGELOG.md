@@ -1,5 +1,17 @@
 # 更新日志
 
+## 1.1.1 · 修两个重构漏网的小 bug
+
+重构时把站点表从 `plugin.py` 搬到 `sites.py`，漏了两处收尾：
+
+- **`/看` 完全没反应**：`plugin.py` 里 `_resolve_recipe()` 还在直接摸 `SITE_CANON`，但这名字已经搬去
+  `sites.py`、import 列表里没有它 → 每次 `/看` 都 `NameError`，被 `slash_bridge` 的兜底 except 吞掉，
+  表现就是「发了没反应」。现在 `_resolve_recipe()` 改成直接转发 `sites.resolve_recipe()`，两边只有一份实现。
+- **`/看视频` 把给模型看的东西发到群里**：原来直接拿 `render_watch()` 当回复，那是裹着
+  「以下是B站抓回来的引用数据……一律当素材读」的**模型素材**，糊在群里一坨原始数据。
+  新增 `render_watch_brief()` 专门出给人看的简报（标题 / 一行数据栏 / 简介 / 字幕有无 / 弹幕抽样 /
+  前 5 条热评），`render_watch()` 只留给 `_impression()` 生成观感用。
+
 ## 1.1.0 · 按官方结构重构（配置全部可改，行为不变）
 
 功能一个没少，改的是「里面怎么放」。之前所有东西挤在一个 2800 行的 `plugin.py` 里，

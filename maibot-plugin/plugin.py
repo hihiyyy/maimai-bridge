@@ -53,7 +53,7 @@ try:
     from bili_video import reactions  # noqa: E402
     from bili_video.client import BiliClient, BiliError, VideoPacket  # noqa: E402
     from bili_video.credential import ensure_credential_file, resolve_credential  # noqa: E402
-    from bili_video.digest import render_watch  # noqa: E402
+    from bili_video.digest import render_watch, render_watch_brief  # noqa: E402
     from bili_video.target import parse_target  # noqa: E402
 except Exception as _video_exc:  # noqa: BLE001
     reactions = None  # type: ignore[assignment]
@@ -63,6 +63,7 @@ except Exception as _video_exc:  # noqa: BLE001
     ensure_credential_file = None  # type: ignore[assignment]
     resolve_credential = None  # type: ignore[assignment]
     render_watch = None  # type: ignore[assignment]
+    render_watch_brief = None  # type: ignore[assignment]
     parse_target = None  # type: ignore[assignment]
     _VIDEO_IMPORT_ERROR = f"{type(_video_exc).__name__}: {_video_exc}"
 
@@ -278,29 +279,14 @@ _BLOCK_MARKERS = resolve_block_markers("")
 
 
 def _resolve_recipe(site: str, url: str) -> Dict[str, Any]:
-    """按站点简写或网址挑一个抽取配方；没有就返回空字典。"""
+    """按站点简写或网址挑一个抽取配方；没有就返回空字典。
 
-    key = (site or "").strip().lower()
-    # 中文站点名要先翻成规范名（微博 / 豆瓣 / 小黑盒 在 SITE_RECIPES 里是 weibo / douban / xiaoheihe）
-    canon = SITE_CANON.get(key, key)
-    for candidate in (key, canon):
-        if candidate in SITE_RECIPES:
-            return SITE_RECIPES[candidate]
+    规范化、中文名映射、按域名兜底这一整套都在 ``sites.resolve_recipe`` 里，
+    这里只做一层转发，免得两边各写一份、改一边忘一边（之前就是漏了 ``SITE_CANON``
+    的导入，``/看`` 直接 NameError）。
+    """
 
-    lowered = (url or "").lower()
-    if "bilibili.com" in lowered:
-        return SITE_RECIPES["bilibili"]
-    if "steampowered.com" in lowered or "steamcommunity.com" in lowered:
-        return SITE_RECIPES["steam"]
-    if "github.com" in lowered:
-        return SITE_RECIPES["github"]
-    if "weibo.cn" in lowered or "weibo.com" in lowered:
-        return SITE_RECIPES["weibo"]
-    if "douban.com" in lowered:
-        return SITE_RECIPES["douban"]
-    if "xiaoheihe.cn" in lowered:
-        return SITE_RECIPES["xiaoheihe"]
-    return {}
+    return resolve_recipe(site, url)
 
 
 def _extract_items(page: Any, recipe: Dict[str, Any]) -> list:
@@ -1698,21 +1684,30 @@ class MaiMaiBridgePlugin(MaiBotPlugin):
         if packet is None:
             return await self._say(stream_id, f"这次没看成：{reason}", "看视频失败")
 
-        text = render_watch(
+        # 发到群里的是给人看的简报；塞给模型生成观感的才是带「引用数据」包裹的
+        # 原始素材。两份分开——之前把 model 素材直接贴进群里，一坨「以下是引用数据」
+        # 糊人脸上。
+        brief = render_watch_brief(
             packet,
             desc_max_chars=min(300, int(cfg.desc_max_chars)),
-            danmaku_limit=min(20, int(cfg.danmaku_limit)),
-            related_limit=0,
+            danmaku_limit=min(8, int(cfg.danmaku_limit)),
+            comment_limit=5,
         )
-        if len(text) > 1800:
-            text = text[:1800].rstrip() + "\n…（到这儿吧，再长就刷屏了）"
+        if len(brief) > 1800:
+            brief = brief[:1800].rstrip() + "\n…（到这儿吧，再长就刷屏了）"
         self.ctx.logger.info("[maimai_bridge] /看视频 完成：%s《%s》", packet.bvid, packet.title)
-        answer = await self._say(stream_id, text, f"看了 {packet.bvid}")
+        answer = await self._say(stream_id, brief, f"看了 {packet.bvid}")
         await self._impression(
             stream_id,
             "B站",
             f"{packet.title}",
-            text[:1500],
+            render_watch(
+                packet,
+                desc_max_chars=500,
+                danmaku_limit=min(20, int(cfg.danmaku_limit)),
+                related_limit=0,
+                wrap=False,
+            )[:1500],
         )
         return answer
 

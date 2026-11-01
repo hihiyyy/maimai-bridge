@@ -145,6 +145,55 @@ def render_watch(
     return wrap_quoted(body) if wrap else body
 
 
+def render_watch_brief(
+    packet: VideoPacket,
+    *,
+    desc_max_chars: int = 300,
+    danmaku_limit: int = 6,
+    comment_limit: int = 5,
+) -> str:
+    """给人看的简报：一行数据栏 + 简介 + 字幕有无 + 弹幕抽样 + 热评。
+
+    和 ``render_watch`` 的区别：那个是塞给模型的原始素材（整段裹在「引用数据」里），
+    这个是直接发到群里的，所以要短、要有排版、不能出现「以下是引用数据」这种
+    对模型说的话。
+    """
+
+    lines: list[str] = [f"【视频】{packet.title}", render_stats(packet)]
+    lines.append(f"链接：{packet.url}")
+
+    desc = (packet.desc or "").strip()
+    if desc:
+        if desc_max_chars > 0 and len(desc) > desc_max_chars:
+            desc = desc[:desc_max_chars].rstrip() + "…"
+        lines.append(f"简介：{desc}")
+
+    if packet.subtitle_lines:
+        lang = f"（{packet.subtitle_lang}）" if packet.subtitle_lang else ""
+        head = [line.strip() for line in packet.subtitle_text.splitlines() if line.strip()][:3]
+        joined = " / ".join(head)[:200]
+        lines.append(f"字幕{lang}：{joined}" if joined else f"字幕{lang}：（空）")
+    else:
+        reason = packet.subtitle_reason or "没有取到字幕"
+        lines.append(f"字幕：没拿到（{reason}）")
+
+    if packet.danmaku_samples and danmaku_limit > 0:
+        samples = packet.danmaku_samples[:danmaku_limit]
+        lines.append(
+            f"弹幕：共 {human_count(packet.danmaku_total)} 条，常见的是 " + " / ".join(samples)
+        )
+
+    if packet.comments and comment_limit > 0:
+        lines.append("热评：")
+        for index, comment in enumerate(packet.comments[:comment_limit], start=1):
+            message = comment.message.strip().replace("\n", " ")
+            if len(message) > 80:
+                message = message[:80] + "…"
+            lines.append(f"{index}. [{human_count(comment.like)}赞] {comment.user}：{message}")
+
+    return "\n".join(line for line in lines if line)
+
+
 def render_candidates(candidates: list[Candidate], *, limit: int = 8) -> str:
     """候选列表（用于让模型自己挑一个去看）。"""
 
